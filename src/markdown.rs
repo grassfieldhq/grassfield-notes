@@ -189,19 +189,40 @@ fn block_prefix(line: &str) -> (usize, Flags, Vec<(usize, usize, Flags)>) {
     (indent, f, marks)
 }
 
+/// Lines longer than this (in bytes) are styled up to here and shown plain after it.
+pub const MAX_STYLED_LINE: usize = 20_000;
+/// Texts larger than this (in bytes) are shown without any Markdown styling.
+pub const MAX_STYLED_TEXT: usize = 1024 * 1024;
+
+/// For every index `i`, the first index `j >= i` where `hit(j)` holds (`n` when none).
+/// Lets each search below jump straight to its answer, so a line is styled in linear time.
+fn next_index(n: usize, hit: impl Fn(usize) -> bool) -> Vec<usize> {
+    let mut next = vec![n; n + 1];
+    for i in (0..n).rev() {
+        next[i] = if hit(i) { i } else { next[i + 1] };
+    }
+    next
+}
+
 /// Mark inline styling for the chars of `content`. Returns per-char flags.
+///
+/// Runs in linear time: every forward search uses a precomputed "next match" table
+/// instead of rescanning the rest of the line for each character.
 fn inline_flags(content: &str, base: Flags) -> Vec<(usize, Flags)> {
     let chars: Vec<(usize, char)> = content.char_indices().collect();
     let n = chars.len();
     let mut flags = vec![base; n];
     let mut protected = vec![false; n];
-    let byte_to_idx = |b: usize| chars.iter().position(|(bi, _)| *bi >= b).unwrap_or(n);
+    let byte_to_idx = |b: usize| chars.partition_point(|(bi, _)| *bi < b);
+    let is = |i: usize, c: char| i < n && chars[i].1 == c;
 
     // code spans
+    let next_tick = next_index(n, |j| chars[j].1 == '`');
     let mut i = 0;
     while i < n {
         if chars[i].1 == '`' {
-            if let Some(j) = (i + 1..n).find(|&j| chars[j].1 == '`') {
+            let j = next_tick[i + 1];
+            if j < n {
                 for k in i..=j {
                     flags[k].code = true;
                     protected[k] = true;
@@ -215,12 +236,12 @@ fn inline_flags(content: &str, base: Flags) -> Vec<(usize, Flags)> {
         i += 1;
     }
     // wiki links [[...]]
+    let next_close = next_index(n, |j| is(j, ']') && is(j + 1, ']'));
     i = 0;
     while i + 1 < n {
         if !protected[i] && chars[i].1 == '[' && chars[i + 1].1 == '[' {
-            if let Some(j) = (i + 2..n.saturating_sub(1))
-                .find(|&j| chars[j].1 == ']' && chars[j + 1].1 == ']')
-            {
+            let j = next_close[i + 2];
+            if j + 1 < n {
                 for k in i..=j + 1 {
                     flags[k].link = true;
                     protected[k] = true;
@@ -235,23 +256,25 @@ fn inline_flags(content: &str, base: Flags) -> Vec<(usize, Flags)> {
         i += 1;
     }
     // markdown links [text](url)
+    let next_bracket = next_index(n, |j| chars[j].1 == ']');
+    let next_paren = next_index(n, |j| chars[j].1 == ')');
     i = 0;
     while i < n {
         if !protected[i] && chars[i].1 == '[' {
-            if let Some(j) = (i + 1..n).find(|&j| chars[j].1 == ']') {
-                if j + 1 < n && chars[j + 1].1 == '(' {
-                    if let Some(k) = (j + 2..n).find(|&k| chars[k].1 == ')') {
-                        for m in i..=k {
-                            protected[m] = true;
-                            flags[m].link = true;
-                        }
-                        flags[i].marker = true;
-                        for m in j..=k {
-                            flags[m].marker = true;
-                        }
-                        i = k + 1;
-                        continue;
+            let j = next_bracket[i + 1];
+            if j + 1 < n && chars[j + 1].1 == '(' {
+                let k = next_paren[(j + 2).min(n)];
+                if k < n {
+                    for m in i..=k {
+                        protected[m] = true;
+                        flags[m].link = true;
                     }
+                    flags[i].marker = true;
+                    for m in j..=k {
+                        flags[m].marker = true;
+                    }
+                    i = k + 1;
+                    continue;
                 }
             }
         }
@@ -294,32 +317,28 @@ fn inline_flags(content: &str, base: Flags) -> Vec<(usize, Flags)> {
     for (delim, kind) in pairs {
         let d: Vec<char> = delim.chars().collect();
         let dl = d.len();
+        // Markers found during this pass sit behind the scan position, so the table of
+        // closing positions computed from the state before the pass stays exact.
         let at = |i: usize, protected: &Vec<bool>, flags: &Vec<Flags>| -> bool {
             i + dl <= n
                 && (0..dl).all(|k| chars[i + k].1 == d[k] && !protected[i + k] && !flags[i + k].marker)
         };
+        let closes = next_index(n, |j| {
+            j > 0
+                && at(j, &protected, &flags)
+                && !chars[j - 1].1.is_whitespace()
+                // for single '*', skip if part of a longer run
+                && !(dl == 1 && j + 1 < n && chars[j + 1].1 == '*')
+        });
         let mut i = 0;
         while i < n {
             if at(i, &protected, &flags) && i + dl < n && !chars[i + dl].1.is_whitespace() {
-                // for single '*', skip if part of a longer run
                 if dl == 1 && ((i + 1 < n && chars[i + 1].1 == '*') || (i > 0 && chars[i - 1].1 == '*')) {
                     i += 1;
                     continue;
                 }
-                let mut found = None;
-                let mut j = i + dl + 1;
-                while j + dl <= n {
-                    if at(j, &protected, &flags) && !chars[j - 1].1.is_whitespace() {
-                        if dl == 1 && j + 1 < n && chars[j + 1].1 == '*' {
-                            j += 1;
-                            continue;
-                        }
-                        found = Some(j);
-                        break;
-                    }
-                    j += 1;
-                }
-                if let Some(j) = found {
+                let j = closes[(i + dl + 1).min(n)];
+                if j < n {
                     for k in i..j + dl {
                         match kind {
                             0 => flags[k].bold = true,
@@ -344,7 +363,34 @@ fn inline_flags(content: &str, base: Flags) -> Vec<(usize, Flags)> {
     chars.iter().zip(flags).map(|((b, _), f)| (*b, f)).collect()
 }
 
+/// The whole text in the body style, with no Markdown styling (for very large texts).
+pub fn plain_job(text: &str, style: &MdStyle, wrap_width: f32) -> LayoutJob {
+    let mut job = LayoutJob {
+        text: text.to_string(),
+        ..Default::default()
+    };
+    job.wrap.max_width = wrap_width;
+    job.sections.push(LayoutSection {
+        leading_space: 0.0,
+        byte_range: ByteIndex(0)..ByteIndex(text.len()),
+        format: style.format(Flags::default()),
+    });
+    job
+}
+
+/// The largest char boundary of `s` at or below `max`.
+fn floor_boundary(s: &str, max: usize) -> usize {
+    let mut i = max.min(s.len());
+    while !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
 pub fn layout_job(text: &str, style: &MdStyle, wrap_width: f32) -> LayoutJob {
+    if text.len() > MAX_STYLED_TEXT {
+        return plain_job(text, style, wrap_width);
+    }
     let mut job = LayoutJob {
         text: text.to_string(),
         ..Default::default()
@@ -415,11 +461,14 @@ pub fn layout_job(text: &str, style: &MdStyle, wrap_width: f32) -> LayoutJob {
             push(&mut job, offset + pos, offset + plen, Flags::default());
         }
         let content = &line[plen..];
-        let fl = inline_flags(content, base);
+        // very long lines: style the start, show the rest plain
+        let styled = floor_boundary(content, MAX_STYLED_LINE);
+        let fl = inline_flags(&content[..styled], base);
         for (idx, (b, f)) in fl.iter().enumerate() {
-            let e = fl.get(idx + 1).map(|x| x.0).unwrap_or(content.len());
+            let e = fl.get(idx + 1).map(|x| x.0).unwrap_or(styled);
             push(&mut job, offset + plen + b, offset + plen + e, *f);
         }
+        push(&mut job, offset + plen + styled, offset + line.len(), base);
         if nl > 0 {
             push(&mut job, offset + line.len(), offset + raw.len(), base);
         }
@@ -557,4 +606,78 @@ pub fn to_html(title: &str, text: &str, dir: Option<&std::path::Path>) -> String
         esc(title),
         body
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn style() -> MdStyle {
+        MdStyle {
+            images: Default::default(),
+            hide_markup: false,
+            theme: crate::theme::get(0),
+            size: 16.0,
+            font: EditorFont::Sans,
+            dim_markup: true,
+            spacing: 1.0,
+        }
+    }
+
+    /// One line of about 1 MB built from openers that never close: the old styling
+    /// rescanned the rest of the line for each of them (48 KB took 26 s).
+    fn hostile_line() -> String {
+        let mut s = String::new();
+        s.push('`');
+        while s.len() < 1024 * 1024 {
+            s.push_str("[[x *y [z ~~w ==v __u **t ");
+            s.push_str("#tag https://e.org/a [l](u ");
+        }
+        s
+    }
+
+    #[test]
+    fn styling_a_one_megabyte_line_is_fast() {
+        let line = hostile_line();
+        // what the window does with such a line
+        let t = std::time::Instant::now();
+        let job = layout_job(&line, &style(), 600.0);
+        let took = t.elapsed();
+        assert!(took < std::time::Duration::from_millis(500), "styling took {took:?}");
+        // and the inline styling itself, on the whole megabyte without the line cap:
+        // linear time (the old code needed 26 s for 48 KB, so hours for 1 MB)
+        let t = std::time::Instant::now();
+        let flags = inline_flags(&line, Flags::default());
+        let full = t.elapsed();
+        assert_eq!(flags.len(), line.chars().count());
+        eprintln!("1 MB line: layout {took:?}, full inline styling {full:?}");
+        assert!(full < std::time::Duration::from_secs(3), "inline styling took {full:?}");
+        let mut pos = 0;
+        for s in &job.sections {
+            assert_eq!(s.byte_range.start.0, pos);
+            pos = s.byte_range.end.0;
+        }
+        assert_eq!(pos, line.len());
+    }
+
+    #[test]
+    fn long_lines_and_huge_texts_fall_back_to_plain() {
+        let st = style();
+        let line = "**gras** ".repeat(MAX_STYLED_LINE / 4);
+        let job = layout_job(&line, &st, 600.0);
+        let last = job.sections.last().unwrap();
+        assert_eq!(last.byte_range.end.0, line.len());
+        assert_eq!(last.format, st.format(Flags::default()), "the end of a very long line is plain");
+        let huge = "# titre\n".repeat(MAX_STYLED_TEXT / 8 + 1);
+        let job = layout_job(&huge, &st, 600.0);
+        assert_eq!(job.sections.len(), 1);
+    }
+
+    #[test]
+    fn styling_still_finds_pairs() {
+        let f = inline_flags("a **b** *c* ~~d~~ ==e== `f` [[g]] [h](i)", Flags::default());
+        let at = |i: usize| f[i].1;
+        assert!(at(4).bold && at(9).italic && at(14).strike && at(20).highlight && at(25).code);
+        assert!(at(30).link && at(36).link);
+    }
 }

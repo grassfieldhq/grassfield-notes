@@ -10,6 +10,7 @@ mod fonts;
 mod i18n;
 mod icons;
 mod platform;
+mod safefs;
 mod sketch;
 mod sync;
 mod markdown;

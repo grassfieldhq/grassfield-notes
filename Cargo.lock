@@ -923,6 +923,7 @@ dependencies = [
  "egui",
  "flate2",
  "image",
+ "libc",
  "serde",
  "serde_json",
 ]

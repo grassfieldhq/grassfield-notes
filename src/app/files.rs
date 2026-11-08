@@ -15,6 +15,8 @@ pub(super) struct OpenFile {
     /// the file changed on disk while there were unsaved edits here
     conflict: bool,
     read_only: bool,
+    /// too large to style: shown as plain text (and read-only)
+    plain: bool,
     /// the file used Windows line endings (kept when saving)
     crlf: bool,
     error: Option<String>,
@@ -33,15 +35,29 @@ pub(super) fn is_markdown(p: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Files larger than this open read-only and without Markdown styling: editing and
+/// styling them would freeze the window.
+pub(super) const MAX_EDIT_BYTES: usize = 1024 * 1024;
+/// Files larger than this are not opened at all.
+pub(super) const MAX_OPEN_BYTES: u64 = 32 * 1024 * 1024;
+
+/// Read a text file the user asked to open: a regular file (never a named pipe or a
+/// device, which would hang the window), of a bounded size, in UTF-8.
+fn read_text(path: &Path) -> Result<String, String> {
+    let bytes = crate::safefs::read_regular(path, crate::safefs::Links::Follow, MAX_OPEN_BYTES)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    String::from_utf8(bytes).map_err(|_| trf("{name} n'est pas un fichier texte (UTF-8)", &[("name", &path.display())]))
+}
+
 impl OpenFile {
     pub fn open(path: &Path, uid: u64) -> Result<Self, String> {
         let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let text = String::from_utf8(bytes).map_err(|_| trf("{name} n'est pas un fichier texte (UTF-8)", &[("name", &path.display())]))?;
+        let text = read_text(&path)?;
         // Windows line endings are edited as plain newlines and written back as they were
         let crlf = text.contains("\r\n");
         let text = text.replace("\r\n", "\n");
-        let read_only = std::fs::metadata(&path).map(|m| m.permissions().readonly()).unwrap_or(false);
+        let plain = text.len() > MAX_EDIT_BYTES;
+        let read_only = plain || std::fs::metadata(&path).map(|m| m.permissions().readonly()).unwrap_or(false);
         Ok(Self {
             disk_mtime: mtime(&path),
             saved: text.clone(),
@@ -51,6 +67,7 @@ impl OpenFile {
             last_check: 0.0,
             conflict: false,
             read_only,
+            plain,
             crlf,
             error: None,
             cache: None,
@@ -84,10 +101,14 @@ impl OpenFile {
     }
 
     fn reload(&mut self) {
-        match std::fs::read_to_string(&self.path) {
+        match read_text(&self.path) {
             Ok(t) => {
                 self.crlf = t.contains("\r\n");
                 let t = t.replace("\r\n", "\n");
+                if t.len() > MAX_EDIT_BYTES {
+                    self.plain = true;
+                    self.read_only = true;
+                }
                 self.saved = t.clone();
                 self.text = t;
                 self.disk_mtime = mtime(&self.path);
@@ -95,7 +116,7 @@ impl OpenFile {
                 self.error = None;
                 self.cache = None;
             }
-            Err(e) => self.error = Some(e.to_string()),
+            Err(e) => self.error = Some(e),
         }
     }
 
@@ -451,10 +472,13 @@ impl GrassApp {
         }
 
         // banners
-        let (conflict, err, read_only) = {
+        let (conflict, mut err, read_only) = {
             let f = &self.files[i];
             (f.conflict, f.error.clone(), f.read_only)
         };
+        if err.is_none() && self.files[i].plain {
+            err = Some(tr("Ce fichier est trop volumineux pour être modifié ici : il s'ouvre en lecture seule, sans mise en forme.").to_string());
+        }
         if conflict || err.is_some() {
             egui::Frame::new().fill(t.highlight_bg.gamma_multiply(0.6)).inner_margin(Margin::symmetric(16, 8)).show(ui, |ui| {
                 ui.set_width(ui.available_width());
@@ -524,6 +548,7 @@ impl GrassApp {
                 let style_key = (settings.theme, settings.font_size.to_bits(), settings.editor_font as u8, settings.dim_markup, settings.line_spacing.to_bits(), reading, img_key);
                 ui.horizontal(|ui| {
                     ui.add_space(side);
+                    let plain = f.plain;
                     let cache = &mut f.cache;
                     let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap: f32| {
                         use std::hash::{Hash, Hasher};
@@ -535,7 +560,7 @@ impl GrassApp {
                         let job = match cache {
                             Some((k, job)) if *k == key => job.clone(),
                             _ => {
-                                let job = markdown::layout_job(buf.as_str(), &style, wrap);
+                                let job = if plain { markdown::plain_job(buf.as_str(), &style, wrap) } else { markdown::layout_job(buf.as_str(), &style, wrap) };
                                 *cache = Some((key, job.clone()));
                                 job
                             }
@@ -697,5 +722,31 @@ mod tests {
         assert_eq!(link_target("lien https://example.org fin", 10).as_deref(), Some("https://example.org"));
         assert_eq!(link_target("voir [[Notes]]", 9).as_deref(), Some("Notes.md"));
     }
-    
+
+    #[test]
+    fn big_files_open_read_only_and_plain() {
+        let dir = std::env::temp_dir().join(format!("gf-bigfile-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("gros.md");
+        std::fs::write(&p, "*a ".repeat(MAX_EDIT_BYTES / 3 + 10)).unwrap();
+        let f = OpenFile::open(&p, 1).unwrap();
+        assert!(f.plain && f.read_only);
+        let small = dir.join("petit.md");
+        std::fs::write(&small, "# ok\n").unwrap();
+        let f = OpenFile::open(&small, 2).unwrap();
+        assert!(!f.plain && !f.read_only);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_named_pipe_never_hangs_the_window() {
+        let dir = std::env::temp_dir().join(format!("gf-fifo-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("piege.md");
+        let _ = std::fs::remove_file(&p);
+        assert!(std::process::Command::new("mkfifo").arg(&p).status().unwrap().success());
+        // returns at once with an error instead of waiting for a writer
+        assert!(OpenFile::open(&p, 1).is_err());
+    }
+
 }
