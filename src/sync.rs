@@ -2,8 +2,19 @@
 //!
 //! Each note is one Markdown file `notes/<id>-<title>.md` with a small header holding its
 //! dates and flags; attachments go to `attachments/<id>/`. The newest edit of a note wins.
+//!
+//! The repository is shared with other people and computers, so its content is untrusted:
+//! - git runs with `core.symlinks=false`, so a committed link is checked out as a small
+//!   plain file holding the link's text, never as a link;
+//! - every file read from the repository is checked with lstat and opened with
+//!   O_NOFOLLOW (only regular files are accepted), and its real path must stay inside the
+//!   repository folder: a link left by an older checkout is never followed either;
+//! - every file written into the repository or the library replaces its target with an
+//!   atomic rename (a link at that name is replaced, never written through), and the
+//!   folders written into are checked to be real folders first.
 
 use crate::model::{now, Attachment, Library, Note, SyncSettings};
+use crate::safefs::{self, Links};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver};
@@ -49,9 +60,18 @@ fn auth_url(s: &SyncSettings) -> String {
     url
 }
 
+/// Largest note file read from the repository.
+const MAX_NOTE_BYTES: u64 = 16 * 1024 * 1024;
+/// Largest attachment copied between the repository and the library.
+const MAX_ATTACHMENT_BYTES: u64 = 512 * 1024 * 1024;
+/// Mode of files written by the sync (the data folder itself is private).
+const FILE_MODE: u32 = 0o600;
+
 fn git(dir: &Path, args: &[&str], token: &str) -> Result<String, String> {
     let out = crate::platform::command("git")
         .current_dir(dir)
+        // a link committed to the repository is checked out as a plain file, never as a link
+        .args(["-c", "core.symlinks=false"])
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new")
@@ -138,18 +158,106 @@ pub fn from_file(s: &str) -> Option<Note> {
     })
 }
 
-fn read_remote(dir: &Path) -> BTreeMap<u64, Note> {
+/// A regular file of the repository, given as a path relative to it, when it is safe to
+/// read: every folder on the way is a real folder (no link), the file itself is a regular
+/// file (lstat, no link), and its real path stays inside the repository.
+fn repo_file(root: &Path, dir: &Path, parts: &[&str]) -> Option<PathBuf> {
+    let mut p = dir.to_path_buf();
+    for (i, part) in parts.iter().enumerate() {
+        if safe_file_name(part).is_none() {
+            return None;
+        }
+        p.push(part);
+        let meta = std::fs::symlink_metadata(&p).ok()?;
+        let last = i + 1 == parts.len();
+        if (last && !meta.is_file()) || (!last && !meta.is_dir()) {
+            return None;
+        }
+    }
+    safefs::is_inside(root, &p).then_some(p)
+}
+
+pub(crate) fn read_remote(dir: &Path) -> BTreeMap<u64, Note> {
     let mut out = BTreeMap::new();
+    let Ok(root) = dir.canonicalize() else { return out };
+    if !safefs::is_real_dir(&dir.join("notes")) {
+        return out;
+    }
     if let Ok(rd) = std::fs::read_dir(dir.join("notes")) {
         for e in rd.flatten() {
-            if let Ok(s) = std::fs::read_to_string(e.path()) {
-                if let Some(n) = from_file(&s) {
-                    out.insert(n.id, n);
-                }
+            let name = e.file_name().to_string_lossy().to_string();
+            let Some(p) = repo_file(&root, dir, &["notes", &name]) else { continue };
+            let Ok(bytes) = safefs::read_regular(&p, Links::Refuse, MAX_NOTE_BYTES) else { continue };
+            if let Some(n) = String::from_utf8(bytes).ok().as_deref().and_then(from_file) {
+                out.insert(n.id, n);
             }
         }
     }
     out
+}
+
+/// Copy the attachments of notes that changed on the other side into the library.
+pub(crate) fn bring_in_attachments(dir: &Path, upserts: &[Note]) {
+    let Ok(root) = dir.canonicalize() else { return };
+    for u in upserts {
+        let id = u.id.to_string();
+        for a in &u.attachments {
+            // the other side has the newer note, so its pictures (and sketch data) win too
+            let side = crate::sketch::sidecar(Path::new(&a.name)).to_string_lossy().to_string();
+            for name in [a.name.as_str(), side.as_str()] {
+                let Some(src) = repo_file(&root, dir, &["attachments", &id, name]) else { continue };
+                let dst_dir = Library::attachment_dir(u.id);
+                if std::fs::create_dir_all(&dst_dir).is_err() || !safefs::is_real_dir(&dst_dir) {
+                    continue;
+                }
+                let _ = safefs::copy_regular(&src, Links::Refuse, &dst_dir.join(name), MAX_ATTACHMENT_BYTES, FILE_MODE);
+            }
+        }
+    }
+}
+
+/// Write the merged notes and their attachments into the repository folder.
+pub(crate) fn write_repo(dir: &Path, final_notes: &[Note]) -> std::io::Result<()> {
+    // the folders written into are real folders: a link committed as "notes" or
+    // "attachments" (or left by an older checkout) is removed, never followed
+    let notes = dir.join("notes");
+    safefs::remove_any(&notes)?;
+    safefs::ensure_real_dir(&notes)?;
+    let atts = dir.join("attachments");
+    safefs::ensure_real_dir(&atts)?;
+    for n in final_notes {
+        let name = format!("{}-{}.md", n.id, slug(&n.title()));
+        safefs::write_atomic(&notes.join(name), to_file(n).as_bytes(), FILE_MODE)?;
+        if n.attachments.is_empty() {
+            continue;
+        }
+        let dst_dir = atts.join(n.id.to_string());
+        safefs::ensure_real_dir(&dst_dir)?;
+        for a in &n.attachments {
+            let Some(name) = safe_file_name(&a.name) else { continue };
+            let src = Library::attachment_dir(n.id).join(&name);
+            if safefs::open_regular(&src, Links::Refuse).is_err() {
+                continue;
+            }
+            let _ = safefs::copy_regular(&src, Links::Refuse, &dst_dir.join(&name), MAX_ATTACHMENT_BYTES, FILE_MODE);
+            let side = crate::sketch::sidecar(&src);
+            if safefs::open_regular(&side, Links::Refuse).is_ok() {
+                let _ = safefs::copy_regular(&side, Links::Refuse, &crate::sketch::sidecar(&dst_dir.join(&name)), MAX_ATTACHMENT_BYTES, FILE_MODE);
+            }
+        }
+    }
+    // drop attachment folders of deleted notes (links are removed, never followed)
+    let keep: BTreeSet<String> = final_notes.iter().map(|n| n.id.to_string()).collect();
+    for e in std::fs::read_dir(&atts)?.flatten() {
+        if !keep.contains(&e.file_name().to_string_lossy().to_string()) {
+            let _ = safefs::remove_any(&e.path());
+        }
+    }
+    safefs::write_atomic(
+        &dir.join("README.md"),
+        crate::i18n::tr("# Notes Grassfield\n\nCe dépôt est synchronisé par Grassfield Notes. Chaque note est un fichier Markdown du dossier `notes/`.\n").as_bytes(),
+        FILE_MODE,
+    )
 }
 
 /// Decide what changes on each side. Pure function, easy to test.
@@ -235,57 +343,11 @@ pub(crate) fn run(settings: SyncSettings, notes: Vec<Note>, synced: BTreeSet<u64
     let (upserts, deletes, final_notes) = merge(&notes, &remote, &synced, remote_exists, settings.last_sync);
 
     // bring attachments of incoming notes into the library folder
-    for u in &upserts {
-        for a in &u.attachments {
-            // the other side has the newer note, so its pictures (and sketch data) win too
-            let src = dir.join("attachments").join(u.id.to_string()).join(&a.name);
-            let dst = Library::attachment_dir(u.id).join(&a.name);
-            if src.exists() {
-                let _ = std::fs::create_dir_all(Library::attachment_dir(u.id));
-                let _ = std::fs::copy(&src, &dst);
-                let side = crate::sketch::sidecar(&src);
-                if side.exists() {
-                    let _ = std::fs::copy(&side, crate::sketch::sidecar(&dst));
-                }
-            }
-        }
-    }
+    bring_in_attachments(&dir, &upserts);
     // rewrite the repository content from the merged notes
-    let _ = std::fs::remove_dir_all(dir.join("notes"));
-    if let Err(e) = std::fs::create_dir_all(dir.join("notes")) {
+    if let Err(e) = write_repo(&dir, &final_notes) {
         return fail(crate::i18n::trf("Écriture impossible : {e}", &[("e", &e as &dyn std::fmt::Display)]));
     }
-    for n in &final_notes {
-        let name = format!("{}-{}.md", n.id, slug(&n.title()));
-        if let Err(e) = std::fs::write(dir.join("notes").join(name), to_file(n)) {
-            return fail(crate::i18n::trf("Écriture impossible : {e}", &[("e", &e as &dyn std::fmt::Display)]));
-        }
-        for a in &n.attachments {
-            let src = Library::attachment_dir(n.id).join(&a.name);
-            let dst_dir = dir.join("attachments").join(n.id.to_string());
-            if src.exists() {
-                let _ = std::fs::create_dir_all(&dst_dir);
-                let _ = std::fs::copy(&src, dst_dir.join(&a.name));
-                let side = crate::sketch::sidecar(&src);
-                if side.exists() {
-                    let _ = std::fs::copy(&side, crate::sketch::sidecar(&dst_dir.join(&a.name)));
-                }
-            }
-        }
-    }
-    // drop attachment folders of deleted notes
-    let keep: BTreeSet<String> = final_notes.iter().map(|n| n.id.to_string()).collect();
-    if let Ok(rd) = std::fs::read_dir(dir.join("attachments")) {
-        for e in rd.flatten() {
-            if !keep.contains(&e.file_name().to_string_lossy().to_string()) {
-                let _ = std::fs::remove_dir_all(e.path());
-            }
-        }
-    }
-    let _ = std::fs::write(
-        dir.join("README.md"),
-        crate::i18n::tr("# Notes Grassfield\n\nCe dépôt est synchronisé par Grassfield Notes. Chaque note est un fichier Markdown du dossier `notes/`.\n"),
-    );
     if let Err(e) = git(&dir, &["add", "-A"], &token) {
         return fail(crate::i18n::trf("git add a échoué : {e}", &[("e", &e as &dyn std::fmt::Display)]));
     }

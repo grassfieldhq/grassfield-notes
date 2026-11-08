@@ -298,3 +298,138 @@ fn note_ids_never_overflow_or_repeat() {
     let b = lib.new_note("b".into());
     assert!(a != u64::MAX && b != u64::MAX && a != b && a != 0 && b != 0);
 }
+
+fn git_in(dir: &std::path::Path, args: &[&str]) {
+    let ok = std::process::Command::new("git")
+        .current_dir(dir)
+        .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "init.defaultBranch=main"])
+        .args(args)
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok, "git {args:?}");
+}
+
+fn note_file(id: u64, attachments: &str, text: &str) -> String {
+    format!("---\nid: {id}\ncreated: 1\nmodified: 9999999999\npinned: false\narchived: false\ntrashed: false\nattachments: {attachments}\n---\n{text}")
+}
+
+/// A collaborator with push access commits links pointing at the victim's files.
+/// Syncing must never read through them, never write through them, and never let
+/// a name with ".." leave the repository.
+#[cfg(unix)]
+#[test]
+fn sync_never_follows_links_from_a_hostile_repository() {
+    use std::os::unix::fs::symlink;
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let base = std::env::temp_dir().join(format!("gf-hostile-sync-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    // the victim's own files (a stand-in home folder, never the real one)
+    let home = base.join("home");
+    std::fs::create_dir_all(home.join("outside/keep")).unwrap();
+    let bashrc = home.join(".bashrc");
+    // shaped like a note: if a link to it were followed, a note would appear
+    let bashrc_text = note_file(77, "[]", "shell startup file");
+    std::fs::write(&bashrc, &bashrc_text).unwrap();
+    let secret = home.join("secret.txt");
+    std::fs::write(&secret, "TOP SECRET").unwrap();
+    std::fs::write(home.join("outside/keep/file"), "keep me").unwrap();
+
+    // the attacker's repository
+    let remote = base.join("remote.git");
+    git_in(&base, &["init", "-q", "--bare", remote.to_str().unwrap()]);
+    let work = base.join("attacker");
+    git_in(&base, &["init", "-q", work.to_str().unwrap()]);
+    std::fs::create_dir_all(work.join("notes")).unwrap();
+    std::fs::create_dir_all(work.join("attachments/5")).unwrap();
+    symlink(&bashrc, work.join("notes/1-evil.md")).unwrap();
+    std::fs::write(work.join("notes/5-ok.md"), note_file(5, r#"["photo.png", "../../.bashrc"]"#, "# Ok")).unwrap();
+    symlink(&secret, work.join("attachments/5/photo.png")).unwrap();
+    std::fs::write(work.join("notes/6-dir.md"), note_file(6, r#"["x.png"]"#, "# Dir")).unwrap();
+    symlink(home.join("outside"), work.join("attachments/6")).unwrap();
+    symlink(&bashrc, work.join("README.md")).unwrap();
+    git_in(&work, &["add", "-A"]);
+    git_in(&work, &["commit", "-q", "-m", "evil"]);
+    git_in(&work, &["push", "-q", remote.to_str().unwrap(), "HEAD:refs/heads/main"]);
+
+    // the victim syncs, with one local note that has an attachment to send
+    std::env::set_var("GRASSFIELD_DATA", base.join("victim").join("library.json"));
+    let mut lib = Library::default();
+    let mine = lib.new_note("# Mine".into());
+    std::fs::create_dir_all(Library::attachment_dir(mine)).unwrap();
+    std::fs::write(Library::attachment_dir(mine).join("a.png"), "picture").unwrap();
+    lib.get_mut(mine).unwrap().attachments.push(Attachment { name: "a.png".into(), text: String::new(), read: true });
+    let settings = SyncSettings { repo_url: remote.display().to_string(), branch: "main".into(), ..Default::default() };
+    let out = crate::sync::run(settings.clone(), lib.notes.clone(), lib.synced_ids.clone());
+    assert!(out.ok, "{}", out.message);
+    crate::sync::apply(&mut lib, out.merge.unwrap());
+
+    assert_eq!(std::fs::read_to_string(&bashrc).unwrap(), bashrc_text, "the startup file was not written through");
+    assert!(lib.get(77).is_none(), "a linked note was read");
+    assert!(lib.get(5).is_some());
+    assert_eq!(lib.get(5).unwrap().attachments.len(), 1, "a name with .. was kept");
+    let pulled = std::fs::read(Library::attachment_dir(5).join("photo.png")).unwrap_or_default();
+    assert_ne!(pulled, b"TOP SECRET", "a local file was pulled into the notes");
+    let outside: Vec<_> = std::fs::read_dir(home.join("outside")).unwrap().flatten().map(|e| e.file_name()).collect();
+    assert_eq!(outside.len(), 1, "something was written into a linked folder: {outside:?}");
+    assert_eq!(std::fs::read_to_string(home.join("outside/keep/file")).unwrap(), "keep me");
+
+    // second round: the whole "attachments" folder becomes a link to the victim's files
+    git_in(&work, &["fetch", "-q", remote.to_str().unwrap(), "main"]);
+    git_in(&work, &["reset", "-q", "--hard", "FETCH_HEAD"]);
+    git_in(&work, &["rm", "-q", "-r", "attachments"]);
+    symlink(home.join("outside"), work.join("attachments")).unwrap();
+    git_in(&work, &["add", "-A"]);
+    git_in(&work, &["commit", "-q", "-m", "evil 2"]);
+    git_in(&work, &["push", "-q", remote.to_str().unwrap(), "HEAD:refs/heads/main"]);
+    let out = crate::sync::run(settings, lib.notes.clone(), lib.synced_ids.clone());
+    assert!(out.ok, "{}", out.message);
+    assert_eq!(std::fs::read_to_string(home.join("outside/keep/file")).unwrap(), "keep me", "a linked folder was emptied");
+    assert!(!home.join("outside").join(mine.to_string()).exists(), "an attachment was written into a linked folder");
+    assert_eq!(std::fs::read_to_string(&bashrc).unwrap(), bashrc_text);
+    std::env::remove_var("GRASSFIELD_DATA");
+}
+
+/// Links already present in the local copy (left by a version without the git setting)
+/// are refused as well: lstat, O_NOFOLLOW and the real-path check.
+#[cfg(unix)]
+#[test]
+fn links_already_in_the_local_copy_are_refused() {
+    use std::os::unix::fs::symlink;
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let base = std::env::temp_dir().join(format!("gf-hostile-copy-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let outside = base.join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("note.md"), note_file(42, "[]", "outside")).unwrap();
+    std::fs::write(outside.join("secret.png"), "TOP SECRET").unwrap();
+    let repo = base.join("repo");
+    std::fs::create_dir_all(repo.join("notes")).unwrap();
+    std::fs::create_dir_all(repo.join("attachments/3")).unwrap();
+    symlink(outside.join("note.md"), repo.join("notes/42-x.md")).unwrap();
+    std::fs::write(repo.join("notes/3-ok.md"), note_file(3, r#"["p.png", "d.png"]"#, "ok")).unwrap();
+    symlink(outside.join("secret.png"), repo.join("attachments/3/p.png")).unwrap();
+    // a folder link on the way
+    symlink(&outside, repo.join("attachments/3/sub")).unwrap();
+    let remote = crate::sync::read_remote(&repo);
+    assert_eq!(remote.keys().copied().collect::<Vec<_>>(), vec![3]);
+
+    std::env::set_var("GRASSFIELD_DATA", base.join("data").join("library.json"));
+    let notes: Vec<_> = remote.into_values().collect();
+    crate::sync::bring_in_attachments(&repo, &notes);
+    assert!(!Library::attachment_dir(3).join("p.png").exists(), "a linked attachment was copied");
+
+    // writing never goes through a linked "notes" folder or README
+    std::fs::remove_dir_all(repo.join("notes")).unwrap();
+    symlink(&outside, repo.join("notes")).unwrap();
+    symlink(outside.join("note.md"), repo.join("README.md")).unwrap();
+    crate::sync::write_repo(&repo, &notes).unwrap();
+    assert!(safefs_is_real_dir(&repo.join("notes")));
+    assert_eq!(std::fs::read_to_string(outside.join("note.md")).unwrap(), note_file(42, "[]", "outside"));
+    assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 2);
+    std::env::remove_var("GRASSFIELD_DATA");
+}
+
+fn safefs_is_real_dir(p: &std::path::Path) -> bool {
+    std::fs::symlink_metadata(p).map(|m| m.is_dir()).unwrap_or(false)
+}
