@@ -117,6 +117,7 @@ pub struct GrassApp {
     other_instance: bool,
     last_inbox_check: f64,
     last_lock_beat: f64,
+    started: std::time::Instant,
 }
 
 impl GrassApp {
@@ -195,6 +196,7 @@ impl GrassApp {
             other_instance,
             last_inbox_check: 0.0,
             last_lock_beat: 0.0,
+            started: std::time::Instant::now(),
         };
         if !open.is_empty() {
             app.open_files(_ctx, open);
@@ -811,6 +813,19 @@ impl GrassApp {
 }
 
 impl eframe::App for GrassApp {
+    /// Runs even while the window is hidden (eframe then skips `ui`).
+    /// In screenshot mode, keep painting so the picture is always taken, and never hang.
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.screenshot.is_some() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaintWhileHidden);
+            ctx.request_repaint();
+            if self.started.elapsed() > std::time::Duration::from_secs(75) {
+                eprintln!("screenshot: timed out");
+                std::process::exit(1);
+            }
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.frame_no += 1;
