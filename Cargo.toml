@@ -1,0 +1,40 @@
+[package]
+name = "grassfield-notes"
+version = "1.0.0"
+edition = "2021"
+description = "A calm, private Markdown notebook with tags, sketches, document scanning, GitHub sync and 6 languages"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/grassfieldhq/grassfield-notes"
+homepage = "https://github.com/grassfieldhq/grassfield-notes"
+keywords = ["notes", "markdown", "notebook", "egui", "desktop"]
+categories = ["text-editors", "gui"]
+exclude = ["shots/", "docs/screenshots/"]
+
+[[bin]]
+name = "grassfield-notes"
+path = "src/main.rs"
+
+[dependencies]
+eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }
+egui = { version = "0.37", features = ["monochrome_emoji_fonts"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "6"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+ab_glyph = "0.2"
+crc32fast = "1"
+flate2 = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2

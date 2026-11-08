@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Grassfield Notes
+Comment=Notes and Markdown files
+Comment[fr]=Notes et fichiers Markdown
+Exec=grassfield-notes %F
+Icon=grassfield-notes
+Terminal=false
+Categories=Office;TextEditor;
+MimeType=text/markdown;text/x-markdown;
+StartupWMClass=grassfield-notes

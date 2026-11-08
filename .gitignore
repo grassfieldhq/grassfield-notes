@@ -1,0 +1,6 @@
+/target/
+/shots/
+*.swp
+.DS_Store
+.idea/
+.vscode/

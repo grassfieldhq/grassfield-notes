@@ -1,0 +1,701 @@
+//! Standalone Markdown files: open any .md on the computer, read it, edit it in place.
+
+use super::*;
+use crate::i18n::{tr, trf};
+use std::path::Path;
+use std::time::SystemTime;
+
+pub(super) struct OpenFile {
+    pub path: PathBuf,
+    pub text: String,
+    saved: String,
+    disk_mtime: Option<SystemTime>,
+    last_edit: f64,
+    last_check: f64,
+    /// the file changed on disk while there were unsaved edits here
+    conflict: bool,
+    read_only: bool,
+    /// the file used Windows line endings (kept when saving)
+    crlf: bool,
+    error: Option<String>,
+    cache: Option<(u64, egui::text::LayoutJob)>,
+    uid: u64,
+}
+
+fn mtime(p: &Path) -> Option<SystemTime> {
+    std::fs::metadata(p).and_then(|m| m.modified()).ok()
+}
+
+pub(super) fn is_markdown(p: &Path) -> bool {
+    p.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| matches!(e.to_lowercase().as_str(), "md" | "markdown" | "mdown" | "mkd" | "txt" | "text"))
+        .unwrap_or(false)
+}
+
+impl OpenFile {
+    pub fn open(path: &Path, uid: u64) -> Result<Self, String> {
+        let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let text = String::from_utf8(bytes).map_err(|_| trf("{name} n'est pas un fichier texte (UTF-8)", &[("name", &path.display())]))?;
+        // Windows line endings are edited as plain newlines and written back as they were
+        let crlf = text.contains("\r\n");
+        let text = text.replace("\r\n", "\n");
+        let read_only = std::fs::metadata(&path).map(|m| m.permissions().readonly()).unwrap_or(false);
+        Ok(Self {
+            disk_mtime: mtime(&path),
+            saved: text.clone(),
+            text,
+            path,
+            last_edit: 0.0,
+            last_check: 0.0,
+            conflict: false,
+            read_only,
+            crlf,
+            error: None,
+            cache: None,
+            uid,
+        })
+    }
+
+    pub fn name(&self) -> String {
+        self.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
+    }
+
+    pub fn dir(&self) -> PathBuf {
+        self.path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from("."))
+    }
+
+    pub fn dirty(&self) -> bool {
+        self.text != self.saved
+    }
+
+    pub fn save(&mut self) -> Result<(), String> {
+        if self.read_only {
+            return Err(tr("Ce fichier est en lecture seule.").to_string());
+        }
+        let out = if self.crlf { self.text.replace('\n', "\r\n") } else { self.text.clone() };
+        std::fs::write(&self.path, out).map_err(|e| e.to_string())?;
+        self.saved = self.text.clone();
+        self.disk_mtime = mtime(&self.path);
+        self.conflict = false;
+        self.error = None;
+        Ok(())
+    }
+
+    fn reload(&mut self) {
+        match std::fs::read_to_string(&self.path) {
+            Ok(t) => {
+                self.crlf = t.contains("\r\n");
+                let t = t.replace("\r\n", "\n");
+                self.saved = t.clone();
+                self.text = t;
+                self.disk_mtime = mtime(&self.path);
+                self.conflict = false;
+                self.error = None;
+                self.cache = None;
+            }
+            Err(e) => self.error = Some(e.to_string()),
+        }
+    }
+
+    /// Follow changes made by other programs.
+    fn check_disk(&mut self, now_t: f64) {
+        if now_t - self.last_check < 1.5 {
+            return;
+        }
+        self.last_check = now_t;
+        let m = mtime(&self.path);
+        if m.is_none() {
+            self.error = Some(tr("Le fichier a été déplacé ou supprimé.").to_string());
+            return;
+        }
+        if m != self.disk_mtime {
+            if self.dirty() {
+                self.conflict = true;
+            } else {
+                self.reload();
+            }
+        }
+    }
+
+    /// Resolve a picture or link target written in the file.
+    pub fn resolve(&self, target: &str) -> PathBuf {
+        let decoded = target.replace("%20", " ");
+        let p = Path::new(&decoded);
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            self.dir().join(p)
+        }
+    }
+}
+
+/// Where "Ajouter à mes notes" puts a file when another window owns the library.
+pub(super) fn inbox_dir() -> PathBuf {
+    Library::data_dir().join("inbox")
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(super) struct InboxItem {
+    pub text: String,
+    pub base_dir: PathBuf,
+}
+
+impl GrassApp {
+    pub(super) fn open_files(&mut self, ctx: &egui::Context, paths: Vec<PathBuf>) {
+        for p in paths {
+            let canon = p.canonicalize().unwrap_or_else(|_| p.clone());
+            if let Some(i) = self.files.iter().position(|f| f.path == canon) {
+                self.active_file = Some(i);
+                continue;
+            }
+            self.file_seq += 1;
+            match OpenFile::open(&p, self.file_seq) {
+                Ok(f) => {
+                    self.files.push(f);
+                    self.active_file = Some(self.files.len() - 1);
+                }
+                Err(e) => self.notify(ctx, trf("Impossible d'ouvrir le fichier : {e}", &[("e", &e)])),
+            }
+        }
+    }
+
+    fn close_file(&mut self, ctx: &egui::Context, i: usize) {
+        if i >= self.files.len() {
+            return;
+        }
+        if self.files[i].dirty() {
+            if let Err(e) = self.files[i].save() {
+                self.notify(ctx, trf("Fichier non enregistré : {e}", &[("e", &e)]));
+                return;
+            }
+        }
+        self.files.remove(i);
+        self.active_file = if self.files.is_empty() { None } else { Some(i.min(self.files.len() - 1)) };
+    }
+
+    /// Save edited files a moment after typing stops, and follow outside changes.
+    pub(super) fn tick_files(&mut self, ctx: &egui::Context) {
+        let now_t = ctx.input(|i| i.time);
+        let mut errors = Vec::new();
+        for f in &mut self.files {
+            f.check_disk(now_t);
+            if f.dirty() && !f.conflict && !f.read_only && now_t - f.last_edit > 1.0 {
+                if let Err(e) = f.save() {
+                    f.error = Some(e.clone());
+                    errors.push(e);
+                }
+            }
+        }
+        if !self.files.is_empty() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(1500));
+        }
+        for e in errors {
+            self.notify(ctx, trf("Fichier non enregistré : {e}", &[("e", &e)]));
+        }
+    }
+
+    /// Copy a file into the library as a note (pictures next to it become attachments).
+    pub(super) fn add_text_to_library(&mut self, ctx: &egui::Context, text: &str, base_dir: &Path) -> Option<u64> {
+        let id = self.lib.new_note(String::new());
+        let mut out = String::with_capacity(text.len());
+        for line in text.split_inclusive('\n') {
+            if let Some(name) = crate::model::image_ref(line) {
+                let p = if Path::new(name).is_absolute() { PathBuf::from(name) } else { base_dir.join(name.replace("%20", " ")) };
+                if p.exists() {
+                    if let Ok(a) = attach::store(id, &p) {
+                        let nl = if line.ends_with('\n') { "\n" } else { "" };
+                        out.push_str(&format!("![]({}){nl}", a.name));
+                        if let Some(n) = self.lib.get_mut(id) {
+                            n.attachments.push(a);
+                        }
+                        continue;
+                    }
+                }
+            }
+            out.push_str(line);
+        }
+        if let Some(n) = self.lib.get_mut(id) {
+            n.text = out;
+        }
+        self.mark_dirty(ctx);
+        Some(id)
+    }
+
+    fn add_file_to_library(&mut self, ctx: &egui::Context, i: usize) {
+        let (text, dir, name) = {
+            let f = &self.files[i];
+            (f.text.clone(), f.dir(), f.name())
+        };
+        if self.persist {
+            if let Some(id) = self.add_text_to_library(ctx, &text, &dir) {
+                self.filter = Filter::All;
+                self.selected = Some(id);
+                self.notify(ctx, trf("« {name} » ajouté à vos notes", &[("name", &name)]));
+            }
+        } else if self.other_instance {
+            // the window that owns the library picks it up within a few seconds
+            let item = InboxItem { text, base_dir: dir };
+            let path = inbox_dir().join(format!("{}.json", chrono::Local::now().format("%Y%m%d-%H%M%S%3f")));
+            let ok = std::fs::create_dir_all(inbox_dir()).is_ok()
+                && serde_json::to_string(&item).ok().map(|s| std::fs::write(&path, s).is_ok()).unwrap_or(false);
+            let msg = if ok { trf("« {name} » envoyé à vos notes dans l'autre fenêtre", &[("name", &name)]) } else { tr("Impossible d'ajouter le fichier à vos notes").to_string() };
+            self.notify(ctx, msg);
+        }
+    }
+
+    /// Bring in files added from other windows.
+    pub(super) fn poll_inbox(&mut self, ctx: &egui::Context) {
+        if !self.persist {
+            return;
+        }
+        let t = ctx.input(|i| i.time);
+        if t - self.last_inbox_check < 3.0 {
+            return;
+        }
+        self.last_inbox_check = t;
+        let Ok(rd) = std::fs::read_dir(inbox_dir()) else { return };
+        let mut added = 0;
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.extension().and_then(|x| x.to_str()) != Some("json") {
+                continue;
+            }
+            if let Some(item) = std::fs::read_to_string(&p).ok().and_then(|s| serde_json::from_str::<InboxItem>(&s).ok()) {
+                if self.add_text_to_library(ctx, &item.text, &item.base_dir).is_some() {
+                    added += 1;
+                }
+            }
+            let _ = std::fs::remove_file(&p);
+        }
+        if added > 0 {
+            self.notify(ctx, trf("{n} fichier(s) ajouté(s) à vos notes", &[("n", &added)]));
+        }
+    }
+
+    fn file_texture(&mut self, ctx: &egui::Context, p: &Path) -> Option<egui::TextureHandle> {
+        let m = mtime(p);
+        if let Some((when, tex)) = self.file_thumbs.get(p) {
+            if *when == m {
+                return tex.clone();
+            }
+        }
+        let tex = image::open(p).ok().map(|img| {
+            let small = img.thumbnail(1000, 1000).to_rgba8();
+            let ci = egui::ColorImage::from_rgba_unmultiplied([small.width() as usize, small.height() as usize], small.as_raw());
+            ctx.load_texture(format!("file-pic-{}", p.display()), ci, egui::TextureOptions::LINEAR)
+        });
+        self.file_thumbs.insert(p.to_path_buf(), (m, tex.clone()));
+        tex
+    }
+
+    /// Insert pictures dropped on an open file: copied next to it, referenced relatively.
+    pub(super) fn add_pictures_to_file(&mut self, ctx: &egui::Context, i: usize, pics: Vec<PathBuf>) {
+        let dir = self.files[i].dir();
+        for p in pics {
+            let target = if p.parent() == Some(dir.as_path()) {
+                p.clone()
+            } else {
+                let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                let mut dst = dir.join(&name);
+                let mut k = 2;
+                while dst.exists() {
+                    dst = dir.join(format!("{k}-{name}"));
+                    k += 1;
+                }
+                if let Err(e) = std::fs::copy(&p, &dst) {
+                    self.notify(ctx, trf("Impossible de joindre {0} : {e}", &[("0", &p.display()), ("e", &e)]));
+                    continue;
+                }
+                dst
+            };
+            let rel = target.file_name().map(|n| n.to_string_lossy().replace(' ', "%20")).unwrap_or_default();
+            let f = &mut self.files[i];
+            if !f.text.ends_with('\n') && !f.text.is_empty() {
+                f.text.push('\n');
+            }
+            f.text.push_str(&format!("![]({rel})\n"));
+            f.last_edit = ctx.input(|x| x.time);
+            f.cache = None;
+        }
+    }
+
+    pub(super) fn file_view(&mut self, ui: &mut egui::Ui) {
+        let t = self.theme();
+        let ctx = ui.ctx().clone();
+        let Some(i) = self.active_file.filter(|i| *i < self.files.len()) else {
+            self.active_file = None;
+            return;
+        };
+        // keyboard: save, close, reading/editing
+        let (save_now, close_now) = ctx.input_mut(|inp| {
+            (
+                inp.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::S)),
+                inp.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::W)),
+            )
+        });
+        if save_now {
+            match self.files[i].save() {
+                Ok(()) => self.notify(&ctx, tr("Fichier enregistré")),
+                Err(e) => self.notify(&ctx, trf("Fichier non enregistré : {e}", &[("e", &e)])),
+            }
+        }
+        if close_now {
+            self.close_file(&ctx, i);
+            return;
+        }
+
+        let mut close_tab: Option<usize> = None;
+        let mut action_add = false;
+        let mut export_fmt: Option<Format> = None;
+        let mut toggle_reading = false;
+        egui::Panel::top("file-top")
+            .frame(egui::Frame::new().fill(t.list_bg).inner_margin(Margin::symmetric(12, 8)))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    if ui.button(tr("‹  Mes notes")).on_hover_text(tr("Revenir à la bibliothèque (les fichiers restent ouverts)")).clicked() {
+                        self.active_file = None;
+                    }
+                    ui.add_space(8.0);
+                    // tabs
+                    for (k, f) in self.files.iter().enumerate() {
+                        let mut label = f.name();
+                        if f.dirty() {
+                            label.push_str(" •");
+                        }
+                        let sel = k == i;
+                        egui::Frame::new()
+                            .fill(if sel { t.editor_bg } else { Color32::TRANSPARENT })
+                            .stroke(Stroke::new(1.0, if sel { t.border } else { Color32::TRANSPARENT }))
+                            .corner_radius(6.0)
+                            .inner_margin(Margin::symmetric(6, 2))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    let r = ui.add(egui::Label::new(egui::RichText::new(label).color(if sel { t.text } else { t.muted })).sense(Sense::click()));
+                                    if r.on_hover_text(f.path.display().to_string()).clicked() {
+                                        self.active_file = Some(k);
+                                    }
+                                    if ui.add(egui::Button::new(egui::RichText::new("✖").size(10.0).color(t.muted)).frame(false)).on_hover_text(tr("Fermer (Ctrl+W)")).clicked() {
+                                        close_tab = Some(k);
+                                    }
+                                });
+                            });
+                    }
+                    if ui.add(egui::Button::new(egui::RichText::new("+").size(16.0).color(t.accent_text)).frame(false)).on_hover_text(tr("Ouvrir un fichier Markdown (Ctrl+O)")).clicked() {
+                        self.actions.push(Action::PickFiles(Purpose::OpenFile));
+                    }
+                });
+                ui.add_space(4.0);
+                let (path_s, dir, ro, dirty) = {
+                    let f = &self.files[i];
+                    (f.path.display().to_string(), f.dir(), f.read_only, f.dirty())
+                };
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(path_s).size(12.0).color(t.muted));
+                    let status = if ro {
+                        tr("Lecture seule")
+                    } else if dirty {
+                        tr("Enregistrement…")
+                    } else {
+                        tr("Enregistré")
+                    };
+                    ui.label(egui::RichText::new(format!("· {status}")).size(12.0).color(t.muted));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.menu_button(tr("📤  Exporter"), |ui| {
+                            for fmt in export::ALL {
+                                if ui.button(fmt.label()).clicked() {
+                                    export_fmt = Some(fmt);
+                                    ui.close();
+                                }
+                            }
+                        });
+                        if ui.button(tr("📂  Dossier")).on_hover_text(tr("Ouvrir le dossier du fichier")).clicked() {
+                            let _ = crate::platform::open_path(&dir);
+                        }
+                        let can_add = self.persist || self.other_instance;
+                        if ui.add_enabled(can_add, egui::Button::new(tr("📥  Ajouter à mes notes"))).on_hover_text(tr("Copier ce fichier dans Grassfield Notes, avec ses images")).clicked() {
+                            action_add = true;
+                        }
+                        let (label, tip) = if self.file_reading {
+                            (tr("✏  Modifier"), tr("Passer en mode édition"))
+                        } else {
+                            (tr("📖  Lecture"), tr("Masquer les symboles Markdown et lire tranquillement"))
+                        };
+                        let b = egui::Button::new(egui::RichText::new(label).color(Color32::WHITE)).fill(t.accent).stroke(Stroke::NONE);
+                        if ui.add_enabled(!ro || !self.file_reading, b).on_hover_text(tip).clicked() {
+                            toggle_reading = true;
+                        }
+                    });
+                });
+            });
+        if toggle_reading {
+            self.file_reading = !self.file_reading;
+            self.files[i].cache = None;
+        }
+        if let Some(k) = close_tab {
+            self.close_file(&ctx, k);
+            return;
+        }
+        if action_add {
+            self.add_file_to_library(&ctx, i);
+        }
+        if let Some(fmt) = export_fmt {
+            let f = &self.files[i];
+            let note = model::Note { id: f.uid, text: f.text.clone(), created: now(), modified: now(), pinned: false, archived: false, trashed: false, attachments: vec![] };
+            let msg = match export::export_note_with(&note, fmt, &Self::export_dir(), &f.dir()) {
+                Ok(p) => trf("Exporté : {0}", &[("0", &p.display())]),
+                Err(e) => trf("Export impossible : {e}", &[("e", &e)]),
+            };
+            self.notify(&ctx, msg);
+        }
+
+        // banners
+        let (conflict, err, read_only) = {
+            let f = &self.files[i];
+            (f.conflict, f.error.clone(), f.read_only)
+        };
+        if conflict || err.is_some() {
+            egui::Frame::new().fill(t.highlight_bg.gamma_multiply(0.6)).inner_margin(Margin::symmetric(16, 8)).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    if conflict {
+                        ui.label(egui::RichText::new(tr("Le fichier a été modifié par un autre programme.")).color(t.text));
+                        if ui.button(tr("Recharger le fichier")).clicked() {
+                            self.files[i].reload();
+                        }
+                        if ui.button(tr("Garder ma version")).clicked() {
+                            let _ = self.files[i].save();
+                        }
+                    } else if let Some(e) = &err {
+                        ui.label(egui::RichText::new(e).color(t.text));
+                    }
+                });
+            });
+        }
+
+        // pictures referenced by the file
+        let refs: Vec<String> = self.files[i]
+            .text
+            .lines()
+            .filter_map(|l| crate::model::image_ref(l).map(|s| s.to_string()))
+            .filter(|n| !n.starts_with("http://") && !n.starts_with("https://"))
+            .collect();
+        let mut pics: Vec<(String, egui::TextureHandle, bool)> = Vec::new();
+        for name in refs {
+            let p = self.files[i].resolve(&name);
+            if let Some(tex) = self.file_texture(&ctx, &p) {
+                pics.push((name, tex, false));
+            }
+        }
+
+        let settings = self.lib.settings.clone();
+        let reading = self.file_reading || read_only;
+        let mut style = MdStyle {
+            images: Default::default(),
+            hide_markup: reading,
+            theme: t,
+            size: settings.font_size,
+            font: settings.editor_font,
+            dim_markup: settings.dim_markup,
+            spacing: settings.line_spacing,
+        };
+        let mut open_pic: Option<String> = None;
+        let mut clicked_box: Option<usize> = None;
+        let mut link_at: Option<usize> = None;
+        let mut edited = false;
+        let f = &mut self.files[i];
+        let editor_id = Id::unique(("file-editor", f.uid));
+        egui::ScrollArea::vertical()
+            .id_salt(("file-scroll", f.uid))
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                let avail = ui.available_width();
+                let pad = if avail < 520.0 { 16.0 } else { 40.0 };
+                let w = settings.line_width.min(avail - 2.0 * pad).max(120.0);
+                let side = ((avail - w) / 2.0).max(pad.min(avail / 2.0));
+                ui.add_space(28.0);
+                let mut img_key = 0u64;
+                for (name, tex, _) in &pics {
+                    let h = overlay::pic_size(tex, w).y + 16.0;
+                    style.images.insert(name.clone(), h);
+                    img_key = img_key.wrapping_mul(31).wrapping_add(h.to_bits() as u64 ^ name.len() as u64);
+                }
+                let style_key = (settings.theme, settings.font_size.to_bits(), settings.editor_font as u8, settings.dim_markup, settings.line_spacing.to_bits(), reading, img_key);
+                ui.horizontal(|ui| {
+                    ui.add_space(side);
+                    let cache = &mut f.cache;
+                    let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap: f32| {
+                        use std::hash::{Hash, Hasher};
+                        let mut h = std::collections::hash_map::DefaultHasher::new();
+                        buf.as_str().hash(&mut h);
+                        wrap.to_bits().hash(&mut h);
+                        style_key.hash(&mut h);
+                        let key = h.finish();
+                        let job = match cache {
+                            Some((k, job)) if *k == key => job.clone(),
+                            _ => {
+                                let job = markdown::layout_job(buf.as_str(), &style, wrap);
+                                *cache = Some((key, job.clone()));
+                                job
+                            }
+                        };
+                        ui.fonts_mut(|fo| fo.layout_job(job))
+                    };
+                    let min_h = (ui.available_height() - 40.0).max(200.0);
+                    let out = if reading {
+                        // selectable but not editable
+                        let mut ro: &str = f.text.as_str();
+                        egui::TextEdit::multiline(&mut ro)
+                            .id(editor_id)
+                            .frame(egui::Frame::NONE)
+                            .desired_width(w)
+                            .min_size(Vec2::new(w, min_h))
+                            .layouter(&mut layouter)
+                            .show(ui)
+                    } else {
+                        egui::TextEdit::multiline(&mut f.text)
+                            .id(editor_id)
+                            .frame(egui::Frame::NONE)
+                            .desired_width(w)
+                            .min_size(Vec2::new(w, min_h))
+                            .lock_focus(true)
+                            .hint_text(tr("Commencez à écrire…"))
+                            .layouter(&mut layouter)
+                            .show(ui)
+                    };
+                    let resp = out.response.response.clone();
+                    if resp.changed() {
+                        edited = true;
+                    }
+                    let galley = out.galley.clone();
+                    let ov = overlay::paint(ui, &overlay::Input {
+                        text: &f.text,
+                        galley: &galley,
+                        gpos: out.galley_pos,
+                        clip: out.text_clip_rect,
+                        resp: &resp,
+                        width: w,
+                        font_size: settings.font_size,
+                        theme: &t,
+                        pics: &pics,
+                        editable: !reading,
+                    });
+                    clicked_box = ov.clicked_box;
+                    open_pic = ov.open_pic.map(|p| p.0);
+                    // links: a plain click while reading, Ctrl+click while editing
+                    let cmd = ui.input(|x| x.modifiers.command);
+                    if resp.clicked() && (reading || cmd) {
+                        if let Some(p) = resp.interact_pointer_pos() {
+                            let c = galley.cursor_from_pos(p - out.galley_pos);
+                            link_at = Some(f.text.char_indices().nth(c.index.0).map(|(b, _)| b).unwrap_or(f.text.len()));
+                        }
+                    }
+                });
+                ui.add_space(40.0);
+            });
+        let now_t = ctx.input(|x| x.time);
+        if let Some(line_start) = clicked_box {
+            if Self::toggle_todo_at_line(&mut f.text, line_start) {
+                edited = true;
+            }
+        }
+        if edited {
+            f.last_edit = now_t;
+        }
+        if let Some(name) = open_pic {
+            let p = f.resolve(&name);
+            let _ = crate::platform::open_path(&p);
+        }
+        if let Some(b) = link_at {
+            let target = link_target(&f.text, b);
+            let base = f.dir();
+            if let Some(target) = target {
+                if target.starts_with("http://") || target.starts_with("https://") || target.starts_with("mailto:") {
+                    let _ = crate::platform::open(&target);
+                } else if !target.starts_with('#') {
+                    let path_part = target.split('#').next().unwrap_or("").replace("%20", " ");
+                    let p = if Path::new(&path_part).is_absolute() { PathBuf::from(&path_part) } else { base.join(&path_part) };
+                    if p.exists() && is_markdown(&p) {
+                        self.open_files(&ctx, vec![p]);
+                    } else if p.exists() {
+                        let _ = crate::platform::open_path(&p);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The target of a Markdown link `[text](target)`, `<url>`, bare URL or `[[name]]` under the byte offset.
+fn link_target(text: &str, byte: usize) -> Option<String> {
+    let byte = byte.min(text.len());
+    let ls = text[..byte].rfind('\n').map(|x| x + 1).unwrap_or(0);
+    let le = text[ls..].find('\n').map(|x| ls + x).unwrap_or(text.len());
+    let line = &text[ls..le];
+    let off = byte - ls;
+    // [text](target)
+    let mut start = 0;
+    while let Some(s) = line[start..].find('[') {
+        let s = start + s;
+        if let Some(mid) = line[s..].find("](") {
+            let mid = s + mid;
+            if let Some(e) = line[mid + 2..].find(')') {
+                let e = mid + 2 + e;
+                if off >= s && off <= e {
+                    let t = line[mid + 2..e].trim();
+                    let t = t.split(" \"").next().unwrap_or(t).trim_matches(['<', '>']);
+                    return Some(t.to_string());
+                }
+                start = e + 1;
+                continue;
+            }
+        }
+        start = s + 1;
+    }
+    // [[name]] -> name.md next to the file
+    if let Some(s) = line.find("[[") {
+        if let Some(e) = line[s..].find("]]") {
+            if off >= s && off <= s + e + 2 {
+                return Some(format!("{}.md", line[s + 2..s + e].trim()));
+            }
+        }
+    }
+    // bare urls
+    for scheme in ["https://", "http://"] {
+        if let Some(s) = line.find(scheme) {
+            let e = line[s..].find(|c: char| c.is_whitespace() || c == ')').map(|x| s + x).unwrap_or(line.len());
+            if off >= s && off <= e {
+                return Some(line[s..e].to_string());
+            }
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn markdown_files_open_save_and_link() {
+        let dir = std::env::temp_dir().join(format!("gf-mdfile-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("Lisez-moi.md");
+        std::fs::write(&p, "# Titre\r\n\r\nVoir [l'autre](Autre%20page.md) et ![plan](img/plan.png \"Plan\")\r\n").unwrap();
+        let mut f = OpenFile::open(&p, 1).unwrap();
+        assert!(!f.text.contains('\r'), "Windows line endings are normalised");
+        assert_eq!(crate::model::image_ref("![plan](img/plan.png \"Plan\")"), Some("img/plan.png"));
+        assert_eq!(crate::model::image_ref("![a](<mon image.png>)"), Some("mon image.png"));
+        assert_eq!(f.resolve("Autre%20page.md"), dir.canonicalize().unwrap().join("Autre page.md"));
+        f.text.push_str("Ajout\n");
+        f.save().unwrap();
+        // the file came with Windows line endings and keeps them
+        assert!(std::fs::read_to_string(&p).unwrap().ends_with("Ajout\r\n"));
+        let text = "Voir [l'autre](Autre%20page.md) ici";
+        assert_eq!(link_target(text, 8).as_deref(), Some("Autre%20page.md"));
+        assert_eq!(link_target("lien https://example.org fin", 10).as_deref(), Some("https://example.org"));
+        assert_eq!(link_target("voir [[Notes]]", 9).as_deref(), Some("Notes.md"));
+    }
+    
+}

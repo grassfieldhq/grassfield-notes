@@ -1,0 +1,63 @@
+name: Bug report
+description: Something doesn't work as expected
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for taking the time to report this! Please don't paste private notes or access tokens.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you see, and what did you expect to see?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open …
+        2. Click …
+        3. See …
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Grassfield Notes version
+      placeholder: "1.0.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Linux (Wayland)
+        - Linux (X11)
+        - Windows
+        - macOS
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      multiple: true
+      options:
+        - Editor / Markdown
+        - Tags, search, sections
+        - Sketches or pictures
+        - Scanning / text in images and PDFs
+        - Standalone Markdown files
+        - Export
+        - GitHub sync
+        - Themes, icons, languages
+        - Other
+  - type: textarea
+    id: extra
+    attributes:
+      label: Screenshots or logs
+      description: Run the app from a terminal to see error messages.
