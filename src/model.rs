@@ -389,6 +389,26 @@ impl Filter {
     }
 }
 
+/// When `name` (a tag as written, any case) is the lowercase tag `tag` or one of its
+/// children (`tag/...`), the byte length of the part of `name` that matches `tag`.
+///
+/// Works char by char on `name` itself: lowercasing can change byte lengths ("İ" is two
+/// bytes, its lowercase "i̇" three), so an offset into the lowercase text is not an
+/// offset into `name`.
+pub fn tag_match_len(name: &str, tag: &str) -> Option<usize> {
+    let mut lowered = String::with_capacity(tag.len());
+    for (i, c) in name.char_indices() {
+        if lowered == tag {
+            return name[i..].starts_with('/').then_some(i);
+        }
+        if !tag.starts_with(lowered.as_str()) {
+            return None;
+        }
+        lowered.extend(c.to_lowercase());
+    }
+    (lowered == tag).then_some(name.len())
+}
+
 pub fn tag_matches(note_tags: &BTreeSet<String>, tag: &str) -> bool {
     note_tags
         .iter()
@@ -438,9 +458,14 @@ impl Library {
 
     pub fn new_note(&mut self, text: String) -> u64 {
         // Ids are based on the clock so notes made on two synced computers don't clash.
-        let clock = (chrono::Local::now().timestamp_millis().max(0) as u64) * 16;
-        let id = (self.next_id + 1).max(clock);
-        self.next_id = id;
+        let clock = (chrono::Local::now().timestamp_millis().max(0) as u64).saturating_mul(16);
+        // `next_id` can come from a synced note, so it may be as large as u64::MAX:
+        // never overflow, and never hand out an id that is already taken.
+        let mut id = self.next_id.checked_add(1).unwrap_or(clock).max(clock);
+        while id == 0 || self.notes.iter().any(|n| n.id == id) {
+            id = id.wrapping_add(1);
+        }
+        self.next_id = self.next_id.max(id);
         let t = now();
         self.notes.push(Note {
             id,
@@ -595,12 +620,11 @@ impl Library {
             let mut changed = false;
             for (s, e) in spans {
                 let name = &n.text[s + 1..e];
-                let lname = name.to_lowercase();
-                if lname == old || (lname.starts_with(old) && lname[old.len()..].starts_with('/')) {
+                if let Some(len) = tag_match_len(name, old) {
                     out.push_str(&n.text[last..s]);
                     out.push('#');
                     out.push_str(&new);
-                    out.push_str(&name[old.len()..]);
+                    out.push_str(&name[len..]);
                     last = e;
                     changed = true;
                 }
@@ -621,8 +645,7 @@ impl Library {
             let mut last = 0;
             let mut changed = false;
             for (s, e) in spans {
-                let lname = n.text[s + 1..e].to_lowercase();
-                if lname == tag || (lname.starts_with(tag) && lname[tag.len()..].starts_with('/')) {
+                if tag_match_len(&n.text[s + 1..e], tag).is_some() {
                     out.push_str(&n.text[last..s]);
                     last = e;
                     changed = true;

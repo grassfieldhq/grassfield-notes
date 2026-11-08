@@ -270,3 +270,31 @@ fn sync_never_trusts_paths_from_the_repository() {
     assert_eq!(n.attachments.len(), 1);
     assert_eq!(n.attachments[0].name, "ok.png");
 }
+
+#[test]
+fn renaming_unicode_tags_never_panics() {
+    // "İ" is two bytes but lowercases to "i̇" (three bytes): offsets must not be mixed up
+    assert_eq!(tag_match_len("İİ", "i̇i̇"), Some("İİ".len()));
+    assert_eq!(tag_match_len("İİ/sous", "i̇i̇"), Some("İİ".len()));
+    assert_eq!(tag_match_len("İİx", "i̇i̇"), None);
+    assert_eq!(tag_match_len("travail", ""), None);
+    let mut lib = Library::default();
+    let id = lib.new_note("# T\n\n#İİ/€ et #İİ/sous et #autre".into());
+    let tags = lib.get(id).unwrap().tags();
+    assert!(tags.contains("i̇i̇"), "{tags:?}");
+    lib.rename_tag("i̇i̇", "neuf");
+    assert_eq!(lib.get(id).unwrap().text, "# T\n\n#neuf/€ et #neuf/sous et #autre");
+    lib.delete_tag("neuf");
+    assert_eq!(lib.get(id).unwrap().text, "# T\n\n/€ et  et #autre");
+}
+
+#[test]
+fn note_ids_never_overflow_or_repeat() {
+    let mut lib = Library::default();
+    // a synced note can carry the largest id there is
+    lib.notes.push(Note { id: u64::MAX, text: String::new(), created: 0, modified: 0, pinned: false, archived: false, trashed: false, attachments: vec![] });
+    lib.next_id = u64::MAX;
+    let a = lib.new_note("a".into());
+    let b = lib.new_note("b".into());
+    assert!(a != u64::MAX && b != u64::MAX && a != b && a != 0 && b != 0);
+}
