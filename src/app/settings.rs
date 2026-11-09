@@ -372,7 +372,11 @@ impl GrassApp {
             if ui.button(crate::i18n::tr("📄  Ouvrir un fichier .md… (Ctrl+O)")).clicked() {
                 self.actions.push(Action::PickFiles(Purpose::OpenFile));
             }
-            if ui.button(crate::i18n::tr("🔗  Ouvrir les fichiers .md avec Grassfield Notes")).on_hover_text(crate::i18n::tr("Double-cliquer sur un fichier .md l'ouvrira ici")).clicked() {
+            // in the Grassfield desktop the session itself makes Notes the app for .md files
+            let grassfield = std::env::var("GRASSFIELD_SESSION").as_deref() == Ok("1");
+            if !grassfield
+                && ui.button(crate::i18n::tr("🔗  Ouvrir les fichiers .md avec Grassfield Notes")).on_hover_text(crate::i18n::tr("Double-cliquer sur un fichier .md l'ouvrira ici")).clicked()
+            {
                 let msg = desktop::associate_markdown();
                 self.notify(ui.ctx(), msg);
             }
