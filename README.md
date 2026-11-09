@@ -130,7 +130,7 @@ On macOS, `Cmd` replaces `Ctrl`.
 1. Create an **empty, private** repository on GitHub.
 2. Open *Settings → GitHub sync* and paste the repository address.
 3. Choose how to sign in:
-   - **HTTPS address** (`https://github.com/you/notes.git`): create a *fine-grained personal access token* with **Contents: read and write** on that repository only, and paste it into the token field.
+   - **HTTPS address** (`https://github.com/you/notes.git`): create a *fine-grained personal access token* with **Contents: read and write** on that repository only, and paste it into the token field. Plain `http://` addresses are refused.
    - **SSH address** (`git@github.com:you/notes.git`): your existing SSH key is used, and no token is needed. Unknown server keys are refused: before the first sync, run `ssh -T git@github.com` once in a terminal, check that the fingerprint matches the one GitHub publishes, and answer `yes`.
 4. Press **Sync now**. On another computer, enter the same repository to get your notes back.
 

@@ -155,18 +155,65 @@ Fixed in `3f1cb17`:
   built-in chooser, the default export folder and the "(my version)" copy are used, for the
   rest of the session. Fixed in `cc1ce7e`.
 
+## Re-audit of 2026-11-09 (at `e9ee20c`): PASS WITH CONDITIONS
+
+The re-audit confirmed H1–H3, M1–M4 and the lows fixed, and raised one condition (C1) and
+eight smaller points. All are fixed on the same branch:
+
+- **C1 / N1, the token over plain HTTP** (sync.rs:66-70, 88-101, 109-118). The askpass
+  helper now answers only a prompt whose address is `https://` and whose server is the
+  repository's own; an `http://` prompt, a prompt without a scheme and another server get
+  nothing. A sync to an `http://`, `git://` or any other non-https, non-SSH address is
+  refused before anything is sent, with a message; SSH addresses and local folders still
+  sync (they never use the token). Fixed in `854253b`, with tests for each case.
+- **N2, the token in the environment of every program git starts.** The token is written
+  to a 0600 file in a private 0700 folder (`grassfield-notes/` in the runtime directory,
+  else in the private data folder), removed when the sync ends; git and the programs it
+  starts only see the file's path, set only for `fetch` and `push`; an inherited token
+  variable is cleared. Fixed in `e7c5776`. (Its commit message says the check was made with
+  the release binary; it was the debug build of the same code.)
+- **N3, unbounded sketch data.** Sketch data is read as a regular file of at most 16 MB and
+  sanitized: size clamped to the canvas, finite widths and points, at most 100,000 points
+  and 10^8 pixel visits of drawing work; drawing clamps the picture to the canvas and each
+  segment only visits its own box. Fixed in `12a032c`.
+- **N4, about 0.8 s per keystroke on a hostile text just under the cap.** A per-line cache
+  restyles only the line a keystroke changed, the layout is assembled by format index, and
+  styling stops at 512 KiB of text (files still open for editing up to 1 MiB). Measured on
+  this loaded machine (load average 12–14) in a debug build, on about 512 KiB of different
+  hostile lines: first styling 355–455 ms, then a keystroke 36–57 ms (the test's limit is
+  150 ms); a release build measured 51 ms at 1 MiB before the cap was halved. Fixed in
+  `f54f21d`.
+- **N5, side effects of atomic saves.** The new file gets the old one's owner and group, its
+  extended attributes (on Linux, POSIX ACLs included) and its mode. When that is not
+  possible (a folder that is not writable, an owner that cannot be given to a new file), the
+  file is written in place after a private backup of its old content, removed once the new
+  text is on disk. Fixed in `1ed57a2`.
+- **N6, chmod of any GRASSFIELD_DATA folder.** Only a folder the app creates is made 0700,
+  plus its own default folder (created 0755 by 1.0.0) when it belongs to the user; this runs
+  once at start. Fixed in `f81235b`.
+- **N7, export edge cases.** The name chosen in the Save panel is kept as given (no extension
+  added), and no second export starts while a panel is open. Fixed in `4d77bf7`.
+- **N8, no portal timeout.** The FileChooser portal must report its version within 8 s, and a
+  panel that never answers is given up after 15 minutes, with the built-in fallback. Fixed
+  in `387e446`.
+- **Integration.** The "Open .md files with Grassfield Notes" button is hidden in the
+  Grassfield session (`GRASSFIELD_SESSION=1`), which sets the default itself. `5d2aac7`.
+- **N9 and the recommendation.** Inherent to the Secret Service (no per-app access control).
+  Anyone who synced with 1.0.0 should revoke and reissue their GitHub token: 1.0.0 kept it in
+  plain text, and copies can survive in `library.json.bak` or in file-system snapshots.
+
 ## Not changed, and why
 
-- **Notes in the library over 1 MiB stay editable.** They are shown without styling (the
-  1 MiB cap is in the styler), but egui still lays the whole text out on the window's thread.
-  Markdown files opened from disk are capped as described under H3.
+- **Notes in the library over 512 KiB stay editable.** They are shown without styling, but
+  egui still lays the whole text out on the window's thread. Markdown files opened from disk
+  are capped as described under H3.
 - **The portal panels are not attached to the window.** egui does not expose the window
   handle the portal needs (`xdg-foreign` on Wayland), so the panels open as separate windows.
 - **Only Linux was built and tested.** The macOS (Keychain) and Windows (Credential Manager)
   keyring stores and the askpass helper on those systems follow the same code paths but were
   not compiled here; the release workflow builds them.
 - **Atomic saves give the file a new inode**, so hard links to a Markdown file keep the old
-  text, and extended attributes are not copied.
+  text (owner, group, mode, extended attributes and ACLs are kept since `1ed57a2`).
 - **`library.json.bak`** is only written when `library.json` cannot be read; one made by 1.0.0
   may still hold a plain-text token. It is now readable by its owner only; delete it if present.
 - **Old `FETCH_HEAD`** files that hold a token are deleted at the next sync, not at start.

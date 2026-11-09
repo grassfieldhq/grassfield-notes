@@ -16,9 +16,11 @@ Fixes for the security audit of 2026-11-08; details in [docs/SECURITY-AUDIT-2026
 - Markdown files are saved atomically with their permissions, never through a link, and a change made by another program is never overwritten without asking (*Keep mine / Keep theirs / Save as*).
 - SSH sync refuses unknown host keys.
 - Renaming tags with letters such as "İ" no longer crashes; note ids can no longer overflow.
+- Re-audit of 2026-11-09: the token is only used with `https://` repositories (plain `http://` and other schemes are refused) and reaches git's askpass helper through a private file, never git's environment; sketch data is bounded; a keystroke only restyles its own line (styling stops at 512 KiB); saves keep the owner, group, attributes and ACLs, or write in place after a backup; only a data folder the app created is made private; exports keep the name chosen in the Save panel; the portal has a timeout.
 
 ### Added
 - The desktop's own Open and Save panels (XDG desktop portal), with the built-in chooser as a fallback.
+- In the Grassfield desktop, the "Open .md files with Grassfield Notes" button is hidden: the session sets the default itself.
 - Release builds for all three systems: a Linux archive with icon and desktop file, a Windows zip, and a universal macOS `Grassfield Notes.app` (Apple Silicon and Intel).
 - Windows: *Open .md files with Grassfield Notes* registers the app in *Open with*.
 - macOS: shortcuts are shown with ⌘.
