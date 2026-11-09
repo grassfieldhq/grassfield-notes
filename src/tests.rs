@@ -433,3 +433,44 @@ fn links_already_in_the_local_copy_are_refused() {
 fn safefs_is_real_dir(p: &std::path::Path) -> bool {
     std::fs::symlink_metadata(p).map(|m| m.is_dir()).unwrap_or(false)
 }
+
+#[test]
+fn the_token_is_never_saved_with_the_notes() {
+    let mut lib = Library::sample();
+    lib.settings.sync.token = "ghp_SECRET_TOKEN".into();
+    lib.settings.sync.token_in_keyring = true;
+    let json = serde_json::to_string(&lib).unwrap();
+    assert!(!json.contains("ghp_SECRET_TOKEN"));
+    // a library saved by an older version is still read, so its token can be moved
+    let old = json.replace("\"token_in_keyring\":true", "\"token\":\"ghp_OLD\"");
+    let back: Library = serde_json::from_str(&old).unwrap();
+    assert_eq!(back.settings.sync.token, "ghp_OLD");
+    assert!(!back.settings.sync.token_in_keyring);
+}
+
+#[test]
+fn the_keyring_keeps_the_token() {
+    // tests always run against an in-memory keyring, never the real one
+    crate::secrets::store("ghp_KEYRING").unwrap();
+    assert_eq!(crate::secrets::load().unwrap().as_deref(), Some("ghp_KEYRING"));
+    crate::secrets::delete().unwrap();
+    assert_eq!(crate::secrets::load().unwrap(), None);
+    crate::secrets::delete().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn the_data_folder_is_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::temp_dir().join(format!("gf-private-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::env::set_var("GRASSFIELD_DATA", dir.join("library.json"));
+    Library::sample().save().unwrap();
+    let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&dir), 0o700);
+    assert_eq!(mode(&dir.join("library.json")), 0o600);
+    std::env::remove_var("GRASSFIELD_DATA");
+}

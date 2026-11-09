@@ -41,6 +41,13 @@ enum SettingsPage {
     Shortcuts,
 }
 
+/// A keyring call running in the background.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SecretOp {
+    Store,
+    Forget,
+}
+
 enum Action {
     Select(u64),
     TogglePin(u64),
@@ -101,6 +108,10 @@ pub struct GrassApp {
     thumbs: attach::Thumbs,
     sync_job: Option<sync::Job>,
     sync_status: Option<(bool, String)>,
+    /// token typed in the settings, not yet handed to the keyring
+    token_input: String,
+    secret_job: Option<(SecretOp, std::sync::mpsc::Receiver<Result<(), String>>)>,
+    secret_status: Option<(bool, String)>,
     last_auto_sync: f64,
     applied_icon: Option<usize>,
     icon_textures: Vec<egui::TextureHandle>,
@@ -183,6 +194,9 @@ impl GrassApp {
             thumbs: attach::Thumbs::default(),
             sync_job: None,
             sync_status: None,
+            token_input: String::new(),
+            secret_job: None,
+            secret_status: None,
             last_auto_sync: f64::NEG_INFINITY,
             applied_icon: None,
             icon_textures: Vec::new(),
@@ -200,6 +214,14 @@ impl GrassApp {
         };
         if !open.is_empty() {
             app.open_files(_ctx, open);
+        }
+        // a token saved in plain text by an older version moves to the system keyring,
+        // and the library is rewritten at once without it
+        let legacy = app.lib.settings.sync.token.trim().to_string();
+        if app.persist && !legacy.is_empty() {
+            app.lib.settings.sync.token_in_keyring = false;
+            app.start_secret(_ctx, SecretOp::Store, legacy);
+            app.save_now();
         }
         // For checking the look in screenshots only: GRASSFIELD_SHOT_STATE=dark,info,settings,focus,trash,tag
         if app.screenshot.is_some() {
@@ -684,10 +706,53 @@ impl GrassApp {
         self.last_auto_sync = ctx.input(|i| i.time);
     }
 
+    /// Store or forget the sync token in the system keyring, in the background.
+    fn start_secret(&mut self, ctx: &egui::Context, op: SecretOp, token: String) {
+        if !self.persist {
+            return;
+        }
+        // usable right away, whatever the keyring answers
+        let t = token.clone();
+        self.lib.settings.sync.token = token;
+        let rx = match op {
+            SecretOp::Store => crate::secrets::spawn(ctx, move || crate::secrets::store(&t)),
+            SecretOp::Forget => crate::secrets::spawn(ctx, crate::secrets::delete),
+        };
+        self.secret_job = Some((op, rx));
+    }
+
+    fn poll_secret(&mut self, ctx: &egui::Context) {
+        let Some((op, rx)) = &self.secret_job else { return };
+        let Ok(res) = rx.try_recv() else { return };
+        let op = *op;
+        self.secret_job = None;
+        let s = &mut self.lib.settings.sync;
+        self.secret_status = Some(match (op, res) {
+            (SecretOp::Store, Ok(())) => {
+                s.token_in_keyring = true;
+                (true, crate::i18n::tr("Jeton enregistré dans le trousseau du système").to_string())
+            }
+            (SecretOp::Store, Err(e)) => {
+                s.token_in_keyring = false;
+                (false, crate::i18n::trf("Trousseau du système indisponible ({e}) : le jeton n'est gardé que jusqu'à la fermeture de Grassfield Notes.", &[("e", &e)]))
+            }
+            (SecretOp::Forget, Ok(())) => {
+                s.token_in_keyring = false;
+                (true, crate::i18n::tr("Jeton retiré du trousseau du système").to_string())
+            }
+            (SecretOp::Forget, Err(e)) => (false, crate::i18n::trf("Le jeton n'a pas pu être retiré du trousseau du système : {e}", &[("e", &e)])),
+        });
+        self.mark_dirty(ctx);
+    }
+
     fn poll_background(&mut self, ctx: &egui::Context) {
+        self.poll_secret(ctx);
         if let Some(job) = &self.sync_job {
             if let Some(out) = job.poll() {
                 self.sync_job = None;
+                if let Some(t) = out.token.clone() {
+                    self.lib.settings.sync.token = t;
+                }
                 if let Some(m) = out.merge {
                     sync::apply(&mut self.lib, m);
                     // pictures may have changed on the other computer

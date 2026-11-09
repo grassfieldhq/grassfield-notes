@@ -306,9 +306,14 @@ pub struct SyncSettings {
     pub repo_url: String,
     #[serde(default)]
     pub branch: String,
-    /// Optional personal access token for HTTPS repositories.
-    #[serde(default)]
+    /// Optional personal access token for HTTPS repositories, in memory only: it is kept
+    /// in the system keyring. Version 1.0.0 saved it here in plain text; such a
+    /// token is still read once, moved to the keyring and never written back.
+    #[serde(default, skip_serializing)]
     pub token: String,
+    /// A token is saved in the system keyring.
+    #[serde(default)]
+    pub token_in_keyring: bool,
     /// Sync on start and every few minutes after changes.
     #[serde(default)]
     pub auto: bool,
@@ -435,25 +440,43 @@ impl Library {
 
     pub fn load_or_sample() -> Self {
         let p = Self::data_path();
+        Self::secure_data_dir();
         if let Ok(s) = std::fs::read_to_string(&p) {
             if let Ok(lib) = serde_json::from_str::<Library>(&s) {
                 return lib;
             }
             // keep a copy of an unreadable file instead of overwriting it
-            let _ = std::fs::copy(&p, p.with_extension("json.bak"));
+            let _ = crate::safefs::copy_regular(&p, crate::safefs::Links::Refuse, &p.with_extension("json.bak"), 1 << 30, 0o600);
         }
         Self::sample()
     }
 
+    /// The data folder holds private notes (and, in version 1.0.0, the sync token): only its
+    /// owner may enter it (0700), and the library file is readable by its owner only (0600).
+    pub fn secure_data_dir() {
+        let dir = Self::data_dir();
+        if dir.as_os_str().is_empty() || dir == std::path::Path::new(".") || dir.parent().is_none() {
+            return;
+        }
+        let _ = std::fs::create_dir_all(&dir);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+            for f in [Self::data_path(), Self::data_path().with_extension("json.bak")] {
+                // never change the mode of whatever a link points to
+                if std::fs::symlink_metadata(&f).map(|m| m.is_file()).unwrap_or(false) {
+                    let _ = std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o600));
+                }
+            }
+        }
+    }
+
     pub fn save(&self) -> std::io::Result<()> {
         let p = Self::data_path();
-        if let Some(dir) = p.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        let tmp = p.with_extension("json.tmp");
+        Self::secure_data_dir();
         let s = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
-        std::fs::write(&tmp, s)?;
-        std::fs::rename(&tmp, &p)
+        crate::safefs::write_atomic(&p, s.as_bytes(), 0o600)
     }
 
     pub fn new_note(&mut self, text: String) -> u64 {

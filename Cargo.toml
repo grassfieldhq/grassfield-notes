@@ -27,8 +27,20 @@ ab_glyph = "0.2"
 crc32fast = "1"
 flate2 = "1"
 
+keyring-core = "1"
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# the system keyring that holds the GitHub token
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus-secret-service-keyring-store = { version = "1", features = ["crypto-rust"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store = { version = "1", features = ["keychain"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-native-keyring-store = "1"
 
 [profile.release]
 opt-level = 3

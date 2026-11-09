@@ -11,6 +11,7 @@ mod i18n;
 mod icons;
 mod platform;
 mod safefs;
+mod secrets;
 mod sketch;
 mod sync;
 mod markdown;
@@ -82,6 +83,10 @@ fn setup_fonts(ctx: &egui::Context) {
 }
 
 fn main() -> eframe::Result<()> {
+    // git runs this same program to ask for the sync token (GIT_ASKPASS): answer and stop
+    if std::env::var_os(sync::ASKPASS_ENV).is_some() {
+        std::process::exit(sync::askpass(std::env::args().nth(1).as_deref().unwrap_or("")));
+    }
     let args: Vec<String> = std::env::args().collect();
     let mut screenshot: Option<PathBuf> = None;
     // any other argument is a Markdown file to open on its own

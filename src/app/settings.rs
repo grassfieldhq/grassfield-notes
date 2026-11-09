@@ -230,6 +230,8 @@ impl GrassApp {
 
     fn page_sync(&mut self, ui: &mut egui::Ui, t: &Theme) -> bool {
         let mut changed = false;
+        let mut store_token: Option<String> = None;
+        let mut forget_token = false;
         ui.label(
             egui::RichText::new(
                 crate::i18n::tr("Vos notes sont copiées dans un dépôt GitHub sous forme de fichiers Markdown (un fichier par note, documents joints compris). Sur un autre ordinateur, indiquez le même dépôt pour retrouver vos notes. Si une note change des deux côtés, la plus récente l'emporte."),
@@ -249,17 +251,37 @@ impl GrassApp {
             changed |= ui.add(egui::TextEdit::singleline(&mut s.branch).hint_text("main").desired_width(160.0)).changed();
             ui.end_row();
             ui.label(crate::i18n::tr("Jeton d'accès"));
-            changed |= ui
-                .add(egui::TextEdit::singleline(&mut s.token).password(true).hint_text(crate::i18n::tr("ghp_… (facultatif avec SSH)")).desired_width(420.0))
-                .changed();
+            ui.horizontal(|ui| {
+                // the token goes to the system keyring when the field is left, never to the notes folder
+                let hint = if s.token_in_keyring { crate::i18n::tr("•••••• enregistré dans le trousseau du système") } else { crate::i18n::tr("ghp_… (facultatif avec SSH)") };
+                let r = ui.add(egui::TextEdit::singleline(&mut self.token_input).password(true).hint_text(hint).desired_width(420.0));
+                if r.lost_focus() && !self.token_input.trim().is_empty() {
+                    store_token = Some(std::mem::take(&mut self.token_input).trim().to_string());
+                }
+                if (s.token_in_keyring || !s.token.is_empty())
+                    && ui.add_enabled(self.secret_job.is_none(), egui::Button::new(crate::i18n::tr("Oublier"))).on_hover_text(crate::i18n::tr("Retirer le jeton du trousseau du système")).clicked()
+                {
+                    forget_token = true;
+                }
+            });
             ui.end_row();
             ui.label(crate::i18n::tr("Automatique"));
             changed |= ui.checkbox(&mut s.auto, crate::i18n::tr("Synchroniser au démarrage puis toutes les 10 minutes")).changed();
             ui.end_row();
         });
+        if let Some(token) = store_token {
+            self.start_secret(ui.ctx(), SecretOp::Store, token);
+        }
+        if forget_token {
+            self.start_secret(ui.ctx(), SecretOp::Forget, String::new());
+        }
+        if let Some((ok, msg)) = &self.secret_status {
+            let col = if *ok { t.accent_text } else { Color32::from_rgb(0xC8, 0x38, 0x2E) };
+            ui.label(egui::RichText::new(msg).color(col).size(12.5));
+        }
         ui.label(
             egui::RichText::new(
-                crate::i18n::tr("Jeton : sur GitHub, Paramètres › Developer settings › Personal access tokens › Fine-grained, accès « Contents : lecture et écriture » au dépôt. Il est enregistré sur cet ordinateur avec vos notes. Avec une adresse git@github.com:…, votre clé SSH est utilisée et le jeton n'est pas nécessaire."),
+                crate::i18n::tr("Jeton : sur GitHub, Paramètres › Developer settings › Personal access tokens › Fine-grained, accès « Contents : lecture et écriture » au dépôt. Il est rangé dans le trousseau du système, jamais avec vos notes. Avec une adresse git@github.com:…, votre clé SSH est utilisée et le jeton n'est pas nécessaire."),
             )
             .size(12.0)
             .color(t.muted),

@@ -33,6 +33,8 @@ pub struct Outcome {
     pub ok: bool,
     pub message: String,
     pub merge: Option<Merge>,
+    /// The token read from the keyring for this sync, kept in memory for the next ones.
+    pub token: Option<String>,
 }
 
 pub struct Job {
@@ -49,15 +51,77 @@ pub fn repo_dir() -> PathBuf {
     Library::data_dir().join("sync-repo")
 }
 
-fn auth_url(s: &SyncSettings) -> String {
-    let url = s.repo_url.trim().to_string();
-    let token = s.token.trim();
-    if !token.is_empty() {
-        if let Some(rest) = url.strip_prefix("https://") {
-            return format!("https://x-access-token:{token}@{rest}");
+/// Set (with the token in `TOKEN_ENV`) when git runs this program to ask for credentials.
+pub const ASKPASS_ENV: &str = "GRASSFIELD_NOTES_ASKPASS";
+const TOKEN_ENV: &str = "GRASSFIELD_NOTES_GIT_TOKEN";
+const HOST_ENV: &str = "GRASSFIELD_NOTES_GIT_HOST";
+
+/// How git signs in for one sync: the token, and the only server it may be given to.
+pub(crate) struct Auth {
+    token: String,
+    host: String,
+}
+
+/// The server of an https address ("github.com" in "https://github.com/a/b.git").
+fn url_host(url: &str) -> String {
+    let rest = url.trim().split_once("://").map(|(_, r)| r).unwrap_or("");
+    let authority = rest.split('/').next().unwrap_or("");
+    authority.rsplit('@').next().unwrap_or("").to_ascii_lowercase()
+}
+
+/// The askpass helper: git asks "Username for '…':" then "Password for '…':".
+/// The token travels in the environment of git and its helpers, which only the same user
+/// can read, never on a command line that `ps` shows to everyone.
+pub fn askpass(prompt: &str) -> i32 {
+    let env = |k| std::env::var(k).unwrap_or_default();
+    match askpass_answer(prompt, &env(TOKEN_ENV), &env(HOST_ENV)) {
+        Some(answer) => {
+            println!("{answer}");
+            0
+        }
+        None => 1,
+    }
+}
+
+/// The answer to one of git's questions, only for the repository's own server: anything
+/// else run by git (a git-lfs server named by the repository, a redirect) gets nothing.
+fn askpass_answer(prompt: &str, token: &str, host: &str) -> Option<String> {
+    // "Password for 'https://x-access-token@github.com': "
+    let asked = prompt.split('\'').nth(1).map(url_host).unwrap_or_default();
+    if host.is_empty() || asked != host {
+        return None;
+    }
+    if prompt.starts_with("Username") {
+        Some("x-access-token".to_string())
+    } else if prompt.starts_with("Password") {
+        Some(token.to_string())
+    } else {
+        None
+    }
+}
+
+/// The git command for one step of a sync.
+fn git_command(dir: &Path, args: &[&str], auth: &Auth) -> std::process::Command {
+    let mut c = crate::platform::command("git");
+    c.current_dir(dir)
+        // a link committed to the repository is checked out as a plain file, never as a link
+        .args(["-c", "core.symlinks=false"]);
+    if !auth.token.is_empty() {
+        if let Ok(exe) = std::env::current_exe() {
+            // no credential helper may store the token (some write it to a plain file)
+            c.args(["-c", "credential.helper="])
+                .env("GIT_ASKPASS", exe)
+                .env(ASKPASS_ENV, "1")
+                .env(TOKEN_ENV, &auth.token)
+                .env(HOST_ENV, &auth.host);
         }
     }
-    url
+    // large-file servers named by the repository are never contacted
+    c.env("GIT_LFS_SKIP_SMUDGE", "1");
+    c.args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new");
+    c
 }
 
 /// Largest note file read from the repository.
@@ -67,14 +131,9 @@ const MAX_ATTACHMENT_BYTES: u64 = 512 * 1024 * 1024;
 /// Mode of files written by the sync (the data folder itself is private).
 const FILE_MODE: u32 = 0o600;
 
-fn git(dir: &Path, args: &[&str], token: &str) -> Result<String, String> {
-    let out = crate::platform::command("git")
-        .current_dir(dir)
-        // a link committed to the repository is checked out as a plain file, never as a link
-        .args(["-c", "core.symlinks=false"])
-        .args(args)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new")
+fn git(dir: &Path, args: &[&str], auth: &Auth) -> Result<String, String> {
+    let token = auth.token.as_str();
+    let out = git_command(dir, args, auth)
         .output()
         .map_err(|e| crate::i18n::trf("git est introuvable sur cet ordinateur ({e})", &[("e", &e as &dyn std::fmt::Display)]))?;
     let hide = |s: String| if token.is_empty() { s } else { s.replace(token, "•••") };
@@ -303,11 +362,22 @@ pub fn merge(
 }
 
 pub(crate) fn run(settings: SyncSettings, notes: Vec<Note>, synced: BTreeSet<u64>) -> Outcome {
-    let fail = |m: String| Outcome { ok: false, message: m, merge: None };
+    let fail = |m: String| Outcome { ok: false, message: m, merge: None, token: None };
     if settings.repo_url.trim().is_empty() {
         return fail(crate::i18n::tr("Indiquez d'abord l'adresse du dépôt GitHub.").into());
     }
-    let token = settings.token.trim().to_string();
+    let mut loaded = None;
+    let mut token = settings.token.trim().to_string();
+    if token.is_empty() && settings.token_in_keyring {
+        match crate::secrets::load() {
+            Ok(t) => {
+                token = t.unwrap_or_default().trim().to_string();
+                loaded = Some(token.clone());
+            }
+            Err(e) => return fail(crate::i18n::trf("Le jeton n'a pas pu être lu dans le trousseau du système : {e}", &[("e", &e)])),
+        }
+    }
+    let auth = Auth { token: token.clone(), host: url_host(&settings.repo_url) };
     let branch = if settings.branch.trim().is_empty() { "main".to_string() } else { settings.branch.trim().to_string() };
     if !safe_branch(&branch) {
         return fail(crate::i18n::trf("Nom de branche invalide : {0}", &[("0", &branch)]));
@@ -317,24 +387,29 @@ pub(crate) fn run(settings: SyncSettings, notes: Vec<Note>, synced: BTreeSet<u64
         return fail(crate::i18n::trf("Dossier de synchronisation impossible à créer : {e}", &[("e", &e as &dyn std::fmt::Display)]));
     }
     if !dir.join(".git").exists() {
-        if let Err(e) = git(&dir, &["init", "-q"], &token) {
+        if let Err(e) = git(&dir, &["init", "-q"], &auth) {
             return fail(crate::i18n::trf("git init a échoué : {e}", &[("e", &e as &dyn std::fmt::Display)]));
         }
     }
-    let _ = git(&dir, &["config", "user.name", "Grassfield Notes"], &token);
-    let _ = git(&dir, &["config", "user.email", "grassfield-notes@localhost"], &token);
-    let url = auth_url(&settings);
+    let _ = git(&dir, &["config", "user.name", "Grassfield Notes"], &auth);
+    let _ = git(&dir, &["config", "user.email", "grassfield-notes@localhost"], &auth);
+    // version 1.0.0 put the token in the address, and git copied it into FETCH_HEAD
+    let fetch_head = dir.join(".git").join("FETCH_HEAD");
+    if std::fs::read_to_string(&fetch_head).map(|s| s.contains("x-access-token:")).unwrap_or(false) {
+        let _ = std::fs::remove_file(&fetch_head);
+    }
+    let url = settings.repo_url.trim().to_string();
     // "--" keeps an address or branch from ever being read as a git option
-    let remote_exists = match git(&dir, &["fetch", "-q", "--", &url, &branch], &token) {
+    let remote_exists = match git(&dir, &["fetch", "-q", "--", &url, &branch], &auth) {
         Ok(_) => {
-            if let Err(e) = git(&dir, &["checkout", "-q", "-B", &branch, "FETCH_HEAD"], &token) {
+            if let Err(e) = git(&dir, &["checkout", "-q", "-B", &branch, "FETCH_HEAD"], &auth) {
                 return fail(crate::i18n::trf("Lecture du dépôt impossible : {e}", &[("e", &e as &dyn std::fmt::Display)]));
             }
-            let _ = git(&dir, &["reset", "-q", "--hard", "FETCH_HEAD"], &token);
+            let _ = git(&dir, &["reset", "-q", "--hard", "FETCH_HEAD"], &auth);
             true
         }
         Err(e) if e.contains("couldn't find remote ref") || e.contains("Couldn't find remote ref") => {
-            let _ = git(&dir, &["checkout", "-q", "-B", &branch], &token);
+            let _ = git(&dir, &["checkout", "-q", "-B", &branch], &auth);
             false // empty repository: first push
         }
         Err(e) => return fail(crate::i18n::trf("Connexion au dépôt impossible : {0}", &[("0", &e.trim() as &dyn std::fmt::Display)])),
@@ -348,19 +423,19 @@ pub(crate) fn run(settings: SyncSettings, notes: Vec<Note>, synced: BTreeSet<u64
     if let Err(e) = write_repo(&dir, &final_notes) {
         return fail(crate::i18n::trf("Écriture impossible : {e}", &[("e", &e as &dyn std::fmt::Display)]));
     }
-    if let Err(e) = git(&dir, &["add", "-A"], &token) {
+    if let Err(e) = git(&dir, &["add", "-A"], &auth) {
         return fail(crate::i18n::trf("git add a échoué : {e}", &[("e", &e as &dyn std::fmt::Display)]));
     }
-    let changed = git(&dir, &["status", "--porcelain"], &token).map(|s| !s.trim().is_empty()).unwrap_or(true);
+    let changed = git(&dir, &["status", "--porcelain"], &auth).map(|s| !s.trim().is_empty()).unwrap_or(true);
     if changed {
         let msg = crate::i18n::trf("Synchronisation Grassfield Notes — {0}", &[("0", &chrono::Local::now().format("%d/%m/%Y %H:%M") as &dyn std::fmt::Display)]);
-        if let Err(e) = git(&dir, &["commit", "-q", "-m", &msg], &token) {
+        if let Err(e) = git(&dir, &["commit", "-q", "-m", &msg], &auth) {
             return fail(crate::i18n::trf("git commit a échoué : {e}", &[("e", &e as &dyn std::fmt::Display)]));
         }
     }
     if changed || !remote_exists {
         let refspec = format!("HEAD:refs/heads/{branch}");
-        if let Err(e) = git(&dir, &["push", "-q", "--", &url, &refspec], &token) {
+        if let Err(e) = git(&dir, &["push", "-q", "--", &url, &refspec], &auth) {
             return fail(crate::i18n::trf("Envoi vers GitHub impossible : {0}", &[("0", &e.trim() as &dyn std::fmt::Display)]));
         }
     }
@@ -373,6 +448,7 @@ pub(crate) fn run(settings: SyncSettings, notes: Vec<Note>, synced: BTreeSet<u64
         ok: true,
         message,
         merge: Some(Merge { upserts, deletes, synced_ids: final_notes.iter().map(|n| n.id).collect(), base_modified }),
+        token: loaded,
     }
 }
 
@@ -422,4 +498,41 @@ pub fn apply(lib: &mut Library, m: Merge) -> usize {
     lib.synced_ids = m.synced_ids;
     lib.settings.sync.last_sync = now();
     changes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_token_never_reaches_the_command_line() {
+        let dir = std::env::temp_dir();
+        let auth = Auth { token: "ghp_SECRET".into(), host: "github.com".into() };
+        let cmd = git_command(&dir, &["fetch", "-q", "--", "https://github.com/a/b.git", "main"], &auth);
+        for a in cmd.get_args() {
+            assert!(!a.to_string_lossy().contains("ghp_SECRET"), "token in argv: {a:?}");
+        }
+        let envs: Vec<_> = cmd.get_envs().map(|(k, v)| (k.to_string_lossy().to_string(), v.map(|v| v.to_string_lossy().to_string()))).collect();
+        assert!(envs.iter().any(|(k, v)| k == "GIT_ASKPASS" && v.is_some()));
+        assert!(envs.iter().any(|(k, v)| k == TOKEN_ENV && v.as_deref() == Some("ghp_SECRET")));
+        // no credential helper may keep a copy of the token
+        assert!(cmd.get_args().any(|a| a == "credential.helper="));
+        // without a token, the user's own git setup is left alone
+        let plain = git_command(&dir, &["status"], &Auth { token: String::new(), host: String::new() });
+        assert!(!plain.get_envs().any(|(k, _)| k == "GIT_ASKPASS"));
+        assert!(!plain.get_args().any(|a| a == "credential.helper="));
+    }
+
+    #[test]
+    fn askpass_answers_git() {
+        let h = url_host("https://GitHub.com/a/b.git");
+        assert_eq!(h, "github.com");
+        assert_eq!(askpass_answer("Username for 'https://github.com': ", "t", &h).as_deref(), Some("x-access-token"));
+        assert_eq!(askpass_answer("Password for 'https://x-access-token@github.com': ", "t", &h).as_deref(), Some("t"));
+        assert_eq!(askpass_answer("Something else", "t", &h), None);
+        // never to another server, whatever runs git's questions
+        assert_eq!(askpass_answer("Password for 'https://x-access-token@lfs.evil.example': ", "t", &h), None);
+        assert_eq!(askpass_answer("Password for 'https://github.com.evil.example': ", "t", &h), None);
+        assert_eq!(askpass_answer("Password for 'https://x-access-token@github.com': ", "t", ""), None);
+    }
 }
