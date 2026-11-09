@@ -41,6 +41,15 @@ enum SettingsPage {
     Shortcuts,
 }
 
+/// Something outside the app the user asked to open: shown to them first.
+#[derive(Clone, Debug, PartialEq)]
+enum OpenRequest {
+    /// a web or mail address, shown in full
+    Link(String),
+    /// a file outside the note's folder, or of a type that is never opened unasked
+    File(PathBuf),
+}
+
 /// A keyring call running in the background.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SecretOp {
@@ -126,6 +135,8 @@ pub struct GrassApp {
     file_seq: u64,
     /// another window owns the library: this one doesn't save notes
     other_instance: bool,
+    /// a link or file waiting for the user's go-ahead
+    pending_open: Option<OpenRequest>,
     /// a file in conflict waits for the user's choice
     conflict_prompt: Option<files::ConflictPrompt>,
     /// every conflict is settled: the window may close
@@ -212,6 +223,7 @@ impl GrassApp {
             file_thumbs: Default::default(),
             file_seq: 0,
             other_instance,
+            pending_open: None,
             conflict_prompt: None,
             quit_confirmed: false,
             last_inbox_check: 0.0,
@@ -524,8 +536,14 @@ impl GrassApp {
                     self.mark_dirty(ctx);
                 }
                 Action::OpenAttachment(id, name) => {
+                    // attachments may come from a synced repository: only pictures and PDFs
+                    // (by name and by content) open directly; anything else is shown in its folder
                     let p = model::Library::attachment_dir(id).join(&name);
-                    let _ = crate::platform::open_path(&p);
+                    if attach::opens_safely(&p, crate::safefs::Links::Refuse) {
+                        let _ = crate::platform::open_path(&p);
+                    } else {
+                        let _ = crate::platform::reveal(&p);
+                    }
                 }
                 Action::SyncNow => self.start_sync(ctx),
                 Action::NewSketch(id) => self.open_sketch(id, None),
@@ -974,6 +992,7 @@ impl eframe::App for GrassApp {
         }
         self.rename_window(&ctx);
         self.confirm_window(&ctx);
+        self.open_window(&ctx);
         self.check_quit(&ctx);
         self.conflict_window(&ctx);
         self.toast(&ctx);

@@ -93,6 +93,27 @@ pub fn kind_of(path: &Path, links: crate::safefs::Links) -> Option<Kind> {
     Kind::sniff(&head)
 }
 
+#[cfg(unix)]
+fn executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).map(|m| m.permissions().mode() & 0o111 != 0).unwrap_or(true)
+}
+
+#[cfg(not(unix))]
+fn executable(_: &Path) -> bool {
+    false
+}
+
+/// A file that may be handed to the computer's default app without asking: its name and
+/// its content both say picture or PDF, and it is not executable. (The default app is
+/// chosen from the name, so a picture named "x.desktop" must not open directly.)
+pub fn opens_safely(path: &Path, links: crate::safefs::Links) -> bool {
+    let Some(kind) = kind_of(path, links) else { return false };
+    let ext = path.extension().and_then(|e| e.to_str()).map(|e| e.to_lowercase()).unwrap_or_default();
+    let named_alike = if kind == Kind::Pdf { DOC_EXT.contains(&ext.as_str()) } else { IMAGE_EXT.contains(&ext.as_str()) };
+    named_alike && !executable(path)
+}
+
 /// Read a picture file: a regular file of bounded size whose content is a picture.
 pub fn read_picture(path: &Path, links: crate::safefs::Links) -> Option<(Vec<u8>, Kind)> {
     let bytes = crate::safefs::read_regular(path, links, MAX_PICTURE_BYTES).ok()?;

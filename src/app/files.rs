@@ -831,25 +831,68 @@ impl GrassApp {
             f.last_edit = now_t;
         }
         if let Some(p) = open_pic.and_then(|name| f.resolve(&name)) {
-            let _ = crate::platform::open_path(&p);
-        }
-        if let Some(b) = link_at {
-            let target = link_target(&f.text, b);
-            let base = f.dir();
-            if let Some(target) = target {
-                if target.starts_with("http://") || target.starts_with("https://") || target.starts_with("mailto:") {
-                    let _ = crate::platform::open(&target);
-                } else if !target.starts_with('#') {
-                    let path_part = target.split('#').next().unwrap_or("").replace("%20", " ");
-                    let p = if Path::new(&path_part).is_absolute() { PathBuf::from(&path_part) } else { base.join(&path_part) };
-                    if p.exists() && is_markdown(&p) {
-                        self.open_files(&ctx, vec![p]);
-                    } else if p.exists() {
-                        let _ = crate::platform::open_path(&p);
-                    }
-                }
+            if attach::opens_safely(&p, crate::safefs::Links::Refuse) {
+                let _ = crate::platform::open_path(&p);
+            } else {
+                self.pending_open = Some(OpenRequest::File(p));
             }
         }
+        if let Some(target) = link_at.and_then(|b| link_target(&f.text, b)) {
+            let base = f.dir();
+            match link_action(&base, &target) {
+                LinkAction::OpenHere(p) => self.open_files(&ctx, vec![p]),
+                LinkAction::OpenPicture(p) => {
+                    let _ = crate::platform::open_path(&p);
+                }
+                LinkAction::Ask(req) => self.pending_open = Some(req),
+                LinkAction::Unsupported => self.notify(&ctx, trf("Ce type de lien n'est pas pris en charge : {0}", &[("0", &target)])),
+                LinkAction::Nothing => {}
+            }
+        }
+    }
+}
+
+/// What a click on a link in a Markdown file does.
+#[derive(Debug, PartialEq)]
+enum LinkAction {
+    /// a Markdown file inside the file's folder: opened in this window
+    OpenHere(PathBuf),
+    /// a picture inside the file's folder: opened with the default app
+    OpenPicture(PathBuf),
+    /// a web address, or a file elsewhere or of another type: shown to the user first
+    Ask(OpenRequest),
+    /// another scheme (ftp:, smb:, javascript:…)
+    Unsupported,
+    /// a missing file or an anchor in the same file
+    Nothing,
+}
+
+fn link_action(base: &Path, target: &str) -> LinkAction {
+    if crate::platform::is_web_link(target) {
+        return LinkAction::Ask(OpenRequest::Link(target.to_string()));
+    }
+    if target.starts_with('#') {
+        return LinkAction::Nothing;
+    }
+    if crate::platform::has_scheme(target) {
+        return LinkAction::Unsupported;
+    }
+    let path_part = target.split('#').next().unwrap_or("");
+    if let Some(p) = crate::safefs::confine(base, path_part) {
+        if is_markdown(&p) && p.is_file() {
+            return LinkAction::OpenHere(p);
+        }
+        if attach::opens_safely(&p, crate::safefs::Links::Refuse) {
+            return LinkAction::OpenPicture(p);
+        }
+    }
+    // anything else (absolute, "..", another type) is named to the user before it opens
+    let decoded = path_part.replace("%20", " ");
+    let p = if Path::new(&decoded).is_absolute() { PathBuf::from(&decoded) } else { base.join(&decoded) };
+    if p.exists() {
+        LinkAction::Ask(OpenRequest::File(p))
+    } else {
+        LinkAction::Nothing
     }
 }
 
@@ -976,6 +1019,35 @@ mod tests {
         // a second copy never overwrites the first
         let copy2 = f.save_copy().unwrap();
         assert_ne!(copy, copy2);
+    }
+
+    #[test]
+    fn links_only_open_unasked_inside_the_folder() {
+        let dir = std::env::temp_dir().join(format!("gf-links-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sous")).unwrap();
+        std::fs::write(dir.join("autre.md"), "# a").unwrap();
+        std::fs::write(dir.join("sous/photo.png"), b"\x89PNG\r\n\x1a\n....").unwrap();
+        std::fs::write(dir.join("faux.png"), b"#!/bin/sh\necho pwned\n").unwrap();
+        std::fs::write(dir.join("photo.desktop"), b"\x89PNG\r\n\x1a\n....").unwrap();
+        std::fs::write(dir.join("script.sh"), b"#!/bin/sh\n").unwrap();
+        let base = dir.canonicalize().unwrap();
+        assert_eq!(link_action(&base, "autre.md"), LinkAction::OpenHere(base.join("autre.md")));
+        assert_eq!(link_action(&base, "sous/photo.png"), LinkAction::OpenPicture(base.join("sous/photo.png")));
+        assert_eq!(link_action(&base, "https://example.org/x"), LinkAction::Ask(OpenRequest::Link("https://example.org/x".into())));
+        assert_eq!(link_action(&base, "mailto:a@b.c"), LinkAction::Ask(OpenRequest::Link("mailto:a@b.c".into())));
+        assert_eq!(link_action(&base, "javascript:alert(1)"), LinkAction::Unsupported);
+        assert_eq!(link_action(&base, "file:///etc/passwd"), LinkAction::Unsupported);
+        assert_eq!(link_action(&base, "#titre"), LinkAction::Nothing);
+        assert_eq!(link_action(&base, "absent.md"), LinkAction::Nothing);
+        // a picture name with other content, a picture content with another name, a script
+        for name in ["faux.png", "photo.desktop", "script.sh"] {
+            assert_eq!(link_action(&base, name), LinkAction::Ask(OpenRequest::File(base.join(name))), "{name}");
+        }
+        // anything outside the folder is named first, even Markdown
+        let outside = link_action(&base.join("sous"), "../autre.md");
+        assert_eq!(outside, LinkAction::Ask(OpenRequest::File(base.join("sous").join("../autre.md"))));
+        assert!(matches!(link_action(&base, "/etc/hostname"), LinkAction::Ask(_) | LinkAction::Nothing));
     }
 
     #[test]

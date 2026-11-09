@@ -674,7 +674,8 @@ impl GrassApp {
                     .map(|x| s + x)
                     .unwrap_or(line.len());
                 if off >= s && off <= e {
-                    let _ = crate::platform::open(&line[s..e]);
+                    // notes may come from a synced repository: show the address first
+                    self.pending_open = Some(OpenRequest::Link(line[s..e].to_string()));
                     return;
                 }
                 st = e.max(s + 1);
