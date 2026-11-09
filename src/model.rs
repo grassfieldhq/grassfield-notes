@@ -451,21 +451,48 @@ impl Library {
         Self::sample()
     }
 
-    /// The data folder holds private notes (and, in version 1.0.0, the sync token): only its
-    /// owner may enter it (0700), and the library file is readable by its owner only (0600).
-    pub fn secure_data_dir() {
+    /// Create the data folder when it does not exist yet: private to its owner (0700).
+    /// A folder that already exists is left as it is.
+    fn ensure_data_dir() -> std::io::Result<()> {
         let dir = Self::data_dir();
-        if dir.as_os_str().is_empty() || dir == std::path::Path::new(".") || dir.parent().is_none() {
-            return;
+        if dir.as_os_str().is_empty() || dir.exists() {
+            return Ok(());
         }
-        let _ = std::fs::create_dir_all(&dir);
+        if let Some(parent) = dir.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        match builder.create(&dir) {
+            Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => Err(e),
+            _ => Ok(()),
+        }
+    }
+
+    /// The data folder holds private notes (and, in version 1.0.0, the sync token). At start:
+    /// - a missing folder is created 0700;
+    /// - the app's own default folder (version 1.0.0 created it 0755) is made 0700 when it
+    ///   belongs to the user; a folder named by GRASSFIELD_DATA, which may be any folder,
+    ///   is never re-permissioned;
+    /// - the library file (and its .bak) are made readable by their owner only (0600).
+    pub fn secure_data_dir() {
+        let _ = Self::ensure_data_dir();
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            let uid = unsafe { libc::geteuid() };
+            let mine = |p: &std::path::Path, dir: bool| {
+                std::fs::symlink_metadata(p).map(|m| m.uid() == uid && if dir { m.is_dir() } else { m.is_file() }).unwrap_or(false)
+            };
+            let default = dirs::data_dir().map(|d| d.join("grassfield-notes"));
+            let dir = Self::data_dir();
+            if std::env::var_os("GRASSFIELD_DATA").is_none() && default.as_deref() == Some(dir.as_path()) && mine(&dir, true) {
+                let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+            }
             for f in [Self::data_path(), Self::data_path().with_extension("json.bak")] {
                 // never change the mode of whatever a link points to
-                if std::fs::symlink_metadata(&f).map(|m| m.is_file()).unwrap_or(false) {
+                if mine(&f, false) {
                     let _ = std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o600));
                 }
             }
@@ -474,7 +501,7 @@ impl Library {
 
     pub fn save(&self) -> std::io::Result<()> {
         let p = Self::data_path();
-        Self::secure_data_dir();
+        Self::ensure_data_dir()?;
         let s = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
         crate::safefs::write_atomic(&p, s.as_bytes(), 0o600)
     }

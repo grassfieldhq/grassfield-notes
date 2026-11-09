@@ -463,15 +463,24 @@ fn the_keyring_keeps_the_token() {
 fn the_data_folder_is_private() {
     use std::os::unix::fs::PermissionsExt;
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    // a folder the app creates is private
     let dir = std::env::temp_dir().join(format!("gf-private-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
     std::env::set_var("GRASSFIELD_DATA", dir.join("library.json"));
     Library::sample().save().unwrap();
-    let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode(&dir), 0o700);
     assert_eq!(mode(&dir.join("library.json")), 0o600);
+    // a folder that already exists (any folder GRASSFIELD_DATA points into) keeps its mode
+    let shared = std::env::temp_dir().join(format!("gf-existing-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&shared);
+    std::fs::create_dir_all(&shared).unwrap();
+    std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::env::set_var("GRASSFIELD_DATA", shared.join("library.json"));
+    Library::secure_data_dir();
+    Library::sample().save().unwrap();
+    assert_eq!(mode(&shared), 0o755, "an existing folder was re-permissioned");
+    assert_eq!(mode(&shared.join("library.json")), 0o600);
     std::env::remove_var("GRASSFIELD_DATA");
 }
 
