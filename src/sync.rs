@@ -62,6 +62,38 @@ pub(crate) struct Auth {
     host: String,
 }
 
+/// What kind of address a repository has.
+#[derive(Debug, PartialEq)]
+enum Remote {
+    /// https: the only kind that ever receives the token (its server, lowercase)
+    Https(String),
+    /// ssh:// or git@host:path: the user's SSH key signs in
+    Ssh,
+    /// a folder on this computer (or file://): nothing travels over a network
+    Local,
+    /// http://, git:// and every other scheme: refused, they would send notes (and
+    /// possibly the token) in clear text
+    Refused(String),
+}
+
+fn remote_kind(url: &str) -> Remote {
+    let u = url.trim();
+    if let Some((scheme, _)) = u.split_once("://") {
+        return match scheme.to_ascii_lowercase().as_str() {
+            "https" => Remote::Https(url_host(u)),
+            "ssh" | "git+ssh" | "ssh+git" => Remote::Ssh,
+            "file" => Remote::Local,
+            other => Remote::Refused(other.to_string()),
+        };
+    }
+    // git's "host:path" form is SSH when a ':' comes before any '/'; a single letter is a
+    // Windows drive ("C:\notes")
+    match u.find(':') {
+        Some(i) if i > 1 && !u[..i].contains('/') => Remote::Ssh,
+        _ => Remote::Local,
+    }
+}
+
 /// The server of an https address ("github.com" in "https://github.com/a/b.git").
 fn url_host(url: &str) -> String {
     let rest = url.trim().split_once("://").map(|(_, r)| r).unwrap_or("");
@@ -83,12 +115,14 @@ pub fn askpass(prompt: &str) -> i32 {
     }
 }
 
-/// The answer to one of git's questions, only for the repository's own server: anything
-/// else run by git (a git-lfs server named by the repository, a redirect) gets nothing.
+/// The answer to one of git's questions, only over https and only for the repository's own
+/// server: a plain http:// prompt, a prompt without a scheme, another server (a git-lfs
+/// server named by the repository, a redirect) all get nothing.
 fn askpass_answer(prompt: &str, token: &str, host: &str) -> Option<String> {
     // "Password for 'https://x-access-token@github.com': "
-    let asked = prompt.split('\'').nth(1).map(url_host).unwrap_or_default();
-    if host.is_empty() || asked != host {
+    let asked = prompt.split('\'').nth(1)?;
+    let (scheme, _) = asked.split_once("://")?;
+    if !scheme.eq_ignore_ascii_case("https") || host.is_empty() || url_host(asked) != host {
         return None;
     }
     if prompt.starts_with("Username") {
@@ -392,7 +426,19 @@ pub(crate) fn run(settings: SyncSettings, notes: Vec<Note>, synced: BTreeSet<u64
             Err(e) => return fail(crate::i18n::trf("Le jeton n'a pas pu être lu dans le trousseau du système : {e}", &[("e", &e)])),
         }
     }
-    let auth = Auth { token: token.clone(), host: url_host(&settings.repo_url) };
+    let url = settings.repo_url.trim().to_string();
+    // the token is only ever used over https; other schemes than https, SSH and a local
+    // folder are refused before anything is sent
+    let auth = match remote_kind(&url) {
+        Remote::Https(host) => Auth { token: token.clone(), host },
+        Remote::Ssh | Remote::Local => Auth { token: String::new(), host: String::new() },
+        Remote::Refused(scheme) => {
+            return fail(crate::i18n::trf(
+                "Adresse refusée ({0}://) : seules les adresses https:// et SSH (git@…) sont acceptées, pour que vos notes et votre jeton ne circulent jamais en clair.",
+                &[("0", &scheme)],
+            ))
+        }
+    };
     let branch = if settings.branch.trim().is_empty() { "main".to_string() } else { settings.branch.trim().to_string() };
     if !safe_branch(&branch) {
         return fail(crate::i18n::trf("Nom de branche invalide : {0}", &[("0", &branch)]));
@@ -413,7 +459,6 @@ pub(crate) fn run(settings: SyncSettings, notes: Vec<Note>, synced: BTreeSet<u64
     if std::fs::read_to_string(&fetch_head).map(|s| s.contains("x-access-token:")).unwrap_or(false) {
         let _ = std::fs::remove_file(&fetch_head);
     }
-    let url = settings.repo_url.trim().to_string();
     // "--" keeps an address or branch from ever being read as a git option
     let remote_exists = match git(&dir, &["fetch", "-q", "--", &url, &branch], &auth) {
         Ok(_) => {
@@ -559,5 +604,29 @@ mod tests {
         assert_eq!(askpass_answer("Password for 'https://x-access-token@lfs.evil.example': ", "t", &h), None);
         assert_eq!(askpass_answer("Password for 'https://github.com.evil.example': ", "t", &h), None);
         assert_eq!(askpass_answer("Password for 'https://x-access-token@github.com': ", "t", ""), None);
+        // never over plain http, never without a scheme
+        assert_eq!(askpass_answer("Password for 'http://x-access-token@github.com': ", "t", &h), None);
+        assert_eq!(askpass_answer("Username for 'http://github.com': ", "t", &h), None);
+        assert_eq!(askpass_answer("Password for 'github.com': ", "t", &h), None);
+        assert_eq!(askpass_answer("Password for 'x-access-token@github.com': ", "t", &h), None);
+        assert_eq!(askpass_answer("Password: ", "t", &h), None);
+    }
+
+    #[test]
+    fn only_https_ssh_and_local_remotes_are_used() {
+        assert_eq!(remote_kind("https://GitHub.com/a/b.git"), Remote::Https("github.com".into()));
+        assert_eq!(remote_kind("git@github.com:a/b.git"), Remote::Ssh);
+        assert_eq!(remote_kind("ssh://git@github.com/a/b.git"), Remote::Ssh);
+        assert_eq!(remote_kind("/home/a/notes.git"), Remote::Local);
+        assert_eq!(remote_kind("file:///home/a/notes.git"), Remote::Local);
+        assert_eq!(remote_kind("C:\\notes"), Remote::Local);
+        for (url, scheme) in [("http://github.com/a/b.git", "http"), ("HTTP://github.com/a", "http"), ("git://github.com/a/b.git", "git"), ("ftp://x/y", "ftp")] {
+            assert_eq!(remote_kind(url), Remote::Refused(scheme.into()), "{url}");
+        }
+        // a sync to a plain http address stops before anything is sent
+        let settings = SyncSettings { repo_url: "http://github.com/a/b.git".into(), token: "ghp_SECRET".into(), ..Default::default() };
+        let out = run(settings, Vec::new(), BTreeSet::new());
+        assert!(!out.ok);
+        assert!(out.message.contains("http://"), "{}", out.message);
     }
 }
