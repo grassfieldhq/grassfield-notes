@@ -1310,6 +1310,7 @@ dependencies = [
  "eframe",
  "egui",
  "flate2",
+ "futures-lite",
  "image",
  "keyring-core",
  "libc",

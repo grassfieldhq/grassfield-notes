@@ -24,6 +24,13 @@ pub enum Ask {
     Save { name: String },
 }
 
+/// How long the portal has to show up and say it has a FileChooser.
+#[cfg(target_os = "linux")]
+const START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+/// A panel that never answers is given up after this (the built-in chooser takes over).
+#[cfg(target_os = "linux")]
+const ANSWER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
 static UNAVAILABLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Worth trying: a Linux desktop session, and no portal failure seen so far.
@@ -53,7 +60,7 @@ fn run(title: &str, ask: Ask, folder: Option<&Path>) -> Answer {
     use ashpd::desktop::file_chooser::{FileFilter, SelectedFiles};
     use ashpd::desktop::ResponseError;
     let folder = folder.filter(|f| f.is_dir());
-    let result = async_io::block_on(async {
+    let show = async {
         let request = match ask {
             Ask::Open { multiple, filter } => {
                 let mut f = FileFilter::new(&filter.0);
@@ -66,12 +73,37 @@ fn run(title: &str, ask: Ask, folder: Option<&Path>) -> Answer {
             Ask::Save { name } => SelectedFiles::save_file().title(title).modal(true).current_name(name.as_str()).current_folder::<&Path>(folder)?.send().await?,
         };
         request.response()
+    };
+    let result = async_io::block_on(async {
+        // a portal that does not even say it has a FileChooser within a few seconds is
+        // not there; one that never answers the panel is given up much later
+        within(START_TIMEOUT, async { filechooser_version().await.ok() }).await?;
+        within(ANSWER_TIMEOUT, async { Some(show.await) }).await
     });
     match result {
-        Ok(files) => Answer::Files(files.uris().iter().filter_map(|u| file_uri_to_path(u.as_str())).collect()),
-        Err(ashpd::Error::Response(ResponseError::Cancelled)) => Answer::Cancelled,
-        Err(_) => Answer::Unavailable,
+        Some(Ok(files)) => Answer::Files(files.uris().iter().filter_map(|u| file_uri_to_path(u.as_str())).collect()),
+        Some(Err(ashpd::Error::Response(ResponseError::Cancelled))) => Answer::Cancelled,
+        Some(Err(_)) | None => Answer::Unavailable,
     }
+}
+
+/// `fut`'s answer, or None when it takes longer than `limit`.
+#[cfg(target_os = "linux")]
+async fn within<T>(limit: std::time::Duration, fut: impl std::future::Future<Output = Option<T>>) -> Option<T> {
+    futures_lite::future::or(fut, async {
+        async_io::Timer::after(limit).await;
+        None
+    })
+    .await
+}
+
+/// The FileChooser portal's version, which only a running portal with a FileChooser
+/// backend can give.
+#[cfg(target_os = "linux")]
+async fn filechooser_version() -> ashpd::zbus::Result<u32> {
+    let conn = ashpd::zbus::Connection::session().await?;
+    let proxy = ashpd::zbus::Proxy::new(&conn, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop", "org.freedesktop.portal.FileChooser").await?;
+    proxy.get_property::<u32>("version").await
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -112,6 +144,17 @@ pub fn file_uri_to_path(uri: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_portal_that_never_answers_is_given_up() {
+        let t = std::time::Instant::now();
+        let never = async_io::block_on(within(std::time::Duration::from_millis(200), std::future::pending::<Option<u8>>()));
+        assert_eq!(never, None);
+        assert!(t.elapsed() < std::time::Duration::from_secs(5));
+        let quick = async_io::block_on(within(std::time::Duration::from_secs(5), async { Some(7) }));
+        assert_eq!(quick, Some(7));
+    }
 
     #[test]
     fn file_uris_become_paths() {
