@@ -65,4 +65,5 @@ pub const ROWS: &[[&str; 6]] = &[
     ["Garder la leur", "Keep theirs", "Conservar la suya", "Ihre behalten", "Tieni la loro", "Manter a deles"],
     ["Enregistrer sous…", "Save as…", "Guardar como…", "Speichern unter …", "Salva come…", "Guardar como…"],
     ["Votre version est enregistrée dans {0}", "Your version was saved to {0}", "Tu versión se guardó en {0}", "Deine Version wurde unter {0} gespeichert", "La tua versione è stata salvata in {0}", "A sua versão foi guardada em {0}"],
+    ["ce n'est ni une image ni un PDF", "it is neither a picture nor a PDF", "no es ni una imagen ni un PDF", "es ist weder ein Bild noch ein PDF", "non è né un'immagine né un PDF", "não é uma imagem nem um PDF"],
 ];

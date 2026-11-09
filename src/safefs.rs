@@ -7,7 +7,7 @@
 
 use std::fs::File;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 /// How a path's last component is treated when it is a symbolic link.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -60,6 +60,20 @@ pub fn read_regular(path: &Path, links: Links, max: u64) -> std::io::Result<Vec<
         return Err(invalid("file too large"));
     }
     Ok(out)
+}
+
+/// A path written in a document (a picture or a link target), resolved inside the
+/// document's folder `base` only: absolute paths and ".." are refused, and once links are
+/// resolved the real path must still be inside `base`. Returns that real path.
+pub fn confine(base: &Path, written: &str) -> Option<PathBuf> {
+    let decoded = written.replace("%20", " ");
+    let rel = Path::new(&decoded);
+    if decoded.is_empty() || rel.components().any(|c| !matches!(c, Component::Normal(_) | Component::CurDir)) {
+        return None;
+    }
+    let root = base.canonicalize().ok()?;
+    let real = root.join(rel).canonicalize().ok()?;
+    real.starts_with(&root).then_some(real)
 }
 
 /// True when `path` is a real folder (not a link to one).

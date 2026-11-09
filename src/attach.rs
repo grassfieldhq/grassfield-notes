@@ -20,12 +20,112 @@ pub fn is_attachable(p: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Largest picture or document read, attached or embedded in an export.
+pub const MAX_PICTURE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// What a file really is, from its first bytes (its name may say anything).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Kind {
+    Png,
+    Jpeg,
+    Gif,
+    Webp,
+    Bmp,
+    Tiff,
+    Pdf,
+}
+
+impl Kind {
+    pub fn sniff(head: &[u8]) -> Option<Kind> {
+        let starts = |m: &[u8]| head.starts_with(m);
+        Some(if starts(b"\x89PNG\r\n\x1a\n") {
+            Kind::Png
+        } else if starts(&[0xFF, 0xD8, 0xFF]) {
+            Kind::Jpeg
+        } else if starts(b"GIF87a") || starts(b"GIF89a") {
+            Kind::Gif
+        } else if head.len() >= 12 && starts(b"RIFF") && &head[8..12] == b"WEBP" {
+            Kind::Webp
+        } else if starts(b"BM") {
+            Kind::Bmp
+        } else if starts(b"II*\0") || starts(b"MM\0*") {
+            Kind::Tiff
+        } else if starts(b"%PDF-") {
+            Kind::Pdf
+        } else {
+            return None;
+        })
+    }
+    pub fn is_picture(self) -> bool {
+        self != Kind::Pdf
+    }
+    /// A fixed extension, never taken from a file name.
+    pub fn ext(self) -> &'static str {
+        match self {
+            Kind::Png => "png",
+            Kind::Jpeg => "jpg",
+            Kind::Gif => "gif",
+            Kind::Webp => "webp",
+            Kind::Bmp => "bmp",
+            Kind::Tiff => "tif",
+            Kind::Pdf => "pdf",
+        }
+    }
+    pub fn mime(self) -> &'static str {
+        match self {
+            Kind::Png => "image/png",
+            Kind::Jpeg => "image/jpeg",
+            Kind::Gif => "image/gif",
+            Kind::Webp => "image/webp",
+            Kind::Bmp => "image/bmp",
+            Kind::Tiff => "image/tiff",
+            Kind::Pdf => "application/pdf",
+        }
+    }
+}
+
+/// What a regular file really is (a link is refused when `links` says so).
+pub fn kind_of(path: &Path, links: crate::safefs::Links) -> Option<Kind> {
+    use std::io::Read;
+    let f = crate::safefs::open_regular(path, links).ok()?;
+    let mut head = Vec::with_capacity(16);
+    f.take(16).read_to_end(&mut head).ok()?;
+    Kind::sniff(&head)
+}
+
+/// Read a picture file: a regular file of bounded size whose content is a picture.
+pub fn read_picture(path: &Path, links: crate::safefs::Links) -> Option<(Vec<u8>, Kind)> {
+    let bytes = crate::safefs::read_regular(path, links, MAX_PICTURE_BYTES).ok()?;
+    let kind = Kind::sniff(&bytes).filter(|k| k.is_picture())?;
+    Some((bytes, kind))
+}
+
+/// Decode a picture with bounded dimensions and memory (no decompression bombs).
+pub fn decode_picture(bytes: &[u8]) -> Option<image::DynamicImage> {
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(20_000);
+    limits.max_image_height = Some(20_000);
+    limits.max_alloc = Some(512 * 1024 * 1024);
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().ok()?;
+    reader.limits(limits);
+    reader.decode().ok()
+}
+
+/// Read and decode a picture file.
+pub fn load_picture(path: &Path, links: crate::safefs::Links) -> Option<image::DynamicImage> {
+    read_picture(path, links).and_then(|(b, _)| decode_picture(&b))
+}
+
 pub fn path_of(note_id: u64, a: &Attachment) -> PathBuf {
     Library::attachment_dir(note_id).join(&a.name)
 }
 
 /// Copy a file into the note's attachment folder; returns the stored attachment.
+/// Only regular files of bounded size whose content is a picture or a PDF are accepted.
 pub fn store(note_id: u64, src: &Path) -> std::io::Result<Attachment> {
+    if kind_of(src, crate::safefs::Links::Follow).is_none() {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, crate::i18n::tr("ce n'est ni une image ni un PDF")));
+    }
     let dir = Library::attachment_dir(note_id);
     std::fs::create_dir_all(&dir)?;
     let file = src.file_name().and_then(|n| n.to_str()).unwrap_or("document").to_string();
@@ -39,7 +139,7 @@ pub fn store(note_id: u64, src: &Path) -> std::io::Result<Attachment> {
         name = format!("{stem} {k}{ext}");
         k += 1;
     }
-    std::fs::copy(src, dir.join(&name))?;
+    crate::safefs::copy_regular(src, crate::safefs::Links::Follow, &dir.join(&name), MAX_PICTURE_BYTES, 0o600)?;
     Ok(Attachment { name, text: String::new(), read: false })
 }
 
@@ -183,7 +283,7 @@ impl Thumbs {
         if let Some(t) = self.map.get(&key) {
             return t.clone();
         }
-        let tex = image::open(path_of(note_id, a)).ok().map(|img| {
+        let tex = load_picture(&path_of(note_id, a), crate::safefs::Links::Refuse).map(|img| {
             let small = img.thumbnail(1000, 1000).to_rgba8();
             let size = [small.width() as usize, small.height() as usize];
             let ci = egui::ColorImage::from_rgba_unmultiplied(size, small.as_raw());

@@ -210,7 +210,8 @@ fn textbundle(note: &Note, path: &Path) -> std::io::Result<()> {
     let mut text = note.text.clone();
     for a in &note.attachments {
         let src = Library::attachment_dir(note.id).join(&a.name);
-        if std::fs::copy(&src, path.join("assets").join(&a.name)).is_ok() {
+        let Some(name) = crate::sync::safe_file_name(&a.name) else { continue };
+        if crate::safefs::copy_regular(&src, crate::safefs::Links::Refuse, &path.join("assets").join(&name), crate::attach::MAX_PICTURE_BYTES, 0o644).is_ok() {
             if text.contains(&format!("]({})", a.name)) {
                 text = text.replace(&format!("]({})", a.name), &format!("](assets/{})", a.name));
             } else {
@@ -395,15 +396,17 @@ pub fn epub(title: &str, text: &str, id: u64, pics: &Path) -> std::io::Result<Ve
             Block::Rule => "<hr/>".to_string(),
             Block::Blank => String::new(),
             Block::Image(n) => {
-                let p = pics.join(&n);
-                match std::fs::read(&p) {
-                    Ok(bytes) => {
+                // only pictures inside the note's own folder; the stored name and type come
+                // from the picture's content, never from the text
+                let picture = crate::safefs::confine(pics, &n).and_then(|p| crate::attach::read_picture(&p, crate::safefs::Links::Refuse));
+                match picture {
+                    Some((bytes, kind)) => {
                         let k = images.len();
-                        let ext = n.rsplit('.').next().unwrap_or("png").to_lowercase();
-                        images.push((format!("images/img{k}.{ext}"), bytes, if ext == "jpg" || ext == "jpeg" { "image/jpeg" } else { "image/png" }));
+                        let ext = kind.ext();
+                        images.push((format!("images/img{k}.{ext}"), bytes, kind.mime()));
                         format!("<p><img src=\"images/img{k}.{ext}\" alt=\"{}\" style=\"max-width:100%\"/></p>", xml(&n))
                     }
-                    Err(_) => format!("<p><em>{}</em></p>", xml(&image_placeholder(&n))),
+                    None => format!("<p><em>{}</em></p>", xml(&image_placeholder(&n))),
                 }
             }
         };

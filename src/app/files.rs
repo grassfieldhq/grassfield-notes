@@ -221,15 +221,10 @@ impl OpenFile {
         }
     }
 
-    /// Resolve a picture or link target written in the file.
-    pub fn resolve(&self, target: &str) -> PathBuf {
-        let decoded = target.replace("%20", " ");
-        let p = Path::new(&decoded);
-        if p.is_absolute() {
-            p.to_path_buf()
-        } else {
-            self.dir().join(p)
-        }
+    /// Resolve a picture or link target written in the file: only inside the file's own
+    /// folder (no absolute path, no "..", no link leading out of it).
+    pub fn resolve(&self, target: &str) -> Option<PathBuf> {
+        crate::safefs::confine(&self.dir(), target)
     }
 }
 
@@ -425,8 +420,11 @@ impl GrassApp {
         let mut out = String::with_capacity(text.len());
         for line in text.split_inclusive('\n') {
             if let Some(name) = crate::model::image_ref(line) {
-                let p = if Path::new(name).is_absolute() { PathBuf::from(name) } else { base_dir.join(name.replace("%20", " ")) };
-                if p.exists() {
+                // only pictures inside the file's own folder come along: the library is
+                // synced, so a path to any other file on the computer is never copied in
+                let picture = crate::safefs::confine(base_dir, name)
+                    .filter(|p| attach::kind_of(p, crate::safefs::Links::Refuse).map(|k| k.is_picture()).unwrap_or(false));
+                if let Some(p) = picture {
                     if let Ok(a) = attach::store(id, &p) {
                         let nl = if line.ends_with('\n') { "\n" } else { "" };
                         out.push_str(&format!("![]({}){nl}", a.name));
@@ -504,7 +502,7 @@ impl GrassApp {
                 return tex.clone();
             }
         }
-        let tex = image::open(p).ok().map(|img| {
+        let tex = attach::load_picture(p, crate::safefs::Links::Refuse).map(|img| {
             let small = img.thumbnail(1000, 1000).to_rgba8();
             let ci = egui::ColorImage::from_rgba_unmultiplied([small.width() as usize, small.height() as usize], small.as_raw());
             ctx.load_texture(format!("file-pic-{}", p.display()), ci, egui::TextureOptions::LINEAR)
@@ -711,7 +709,7 @@ impl GrassApp {
             .collect();
         let mut pics: Vec<(String, egui::TextureHandle, bool)> = Vec::new();
         for name in refs {
-            let p = self.files[i].resolve(&name);
+            let Some(p) = self.files[i].resolve(&name) else { continue };
             if let Some(tex) = self.file_texture(&ctx, &p) {
                 pics.push((name, tex, false));
             }
@@ -832,8 +830,7 @@ impl GrassApp {
         if edited {
             f.last_edit = now_t;
         }
-        if let Some(name) = open_pic {
-            let p = f.resolve(&name);
+        if let Some(p) = open_pic.and_then(|name| f.resolve(&name)) {
             let _ = crate::platform::open_path(&p);
         }
         if let Some(b) = link_at {
@@ -912,11 +909,15 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("Lisez-moi.md");
         std::fs::write(&p, "# Titre\r\n\r\nVoir [l'autre](Autre%20page.md) et ![plan](img/plan.png \"Plan\")\r\n").unwrap();
+        std::fs::write(dir.join("Autre page.md"), "# Autre\n").unwrap();
         let mut f = OpenFile::open(&p, 1).unwrap();
         assert!(!f.text.contains('\r'), "Windows line endings are normalised");
         assert_eq!(crate::model::image_ref("![plan](img/plan.png \"Plan\")"), Some("img/plan.png"));
         assert_eq!(crate::model::image_ref("![a](<mon image.png>)"), Some("mon image.png"));
-        assert_eq!(f.resolve("Autre%20page.md"), dir.canonicalize().unwrap().join("Autre page.md"));
+        assert_eq!(f.resolve("Autre%20page.md"), Some(dir.canonicalize().unwrap().join("Autre page.md")));
+        // nothing outside the file's folder
+        assert_eq!(f.resolve("/etc/passwd"), None);
+        assert_eq!(f.resolve("../Lisez-moi.md"), None);
         f.text.push_str("Ajout\n");
         f.save().unwrap();
         // the file came with Windows line endings and keeps them

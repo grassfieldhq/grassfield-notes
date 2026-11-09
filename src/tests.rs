@@ -474,3 +474,39 @@ fn the_data_folder_is_private() {
     assert_eq!(mode(&dir.join("library.json")), 0o600);
     std::env::remove_var("GRASSFIELD_DATA");
 }
+
+/// Pictures written in a document are read only from its own folder, only as real
+/// pictures, and never from a pipe; exports escape what they put in attributes.
+#[cfg(unix)]
+#[test]
+fn pictures_never_leave_the_document_folder() {
+    let base = std::env::temp_dir().join(format!("gf-pictures-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let doc = base.join("doc");
+    std::fs::create_dir_all(&doc).unwrap();
+    let secret = base.join("secret.png");
+    image::RgbImage::from_pixel(4, 4, image::Rgb([1, 2, 3])).save(&secret).unwrap();
+    image::RgbImage::from_pixel(4, 4, image::Rgb([200, 40, 40])).save(doc.join("ok.png")).unwrap();
+    std::fs::write(doc.join("fake.png"), "not a picture").unwrap();
+    std::os::unix::fs::symlink(&secret, doc.join("link.png")).unwrap();
+    assert!(std::process::Command::new("mkfifo").arg(doc.join("pipe.png")).status().unwrap().success());
+    let doc_real = doc.canonicalize().unwrap();
+    assert_eq!(crate::safefs::confine(&doc, "ok.png"), Some(doc_real.join("ok.png")));
+    for bad in ["../secret.png", "/etc/passwd", secret.to_str().unwrap(), "link.png", ""] {
+        assert_eq!(crate::safefs::confine(&doc, bad), None, "{bad}");
+    }
+    assert!(crate::attach::read_picture(&doc_real.join("fake.png"), crate::safefs::Links::Refuse).is_none());
+    assert!(crate::attach::read_picture(&doc_real.join("pipe.png"), crate::safefs::Links::Refuse).is_none(), "a pipe is never read");
+    // exports embed only pictures from the folder, and escape what goes in attributes
+    let quoted = "q\" onerror=\"x.png";
+    image::RgbImage::from_pixel(4, 4, image::Rgb([9, 9, 9])).save_with_format(doc.join(quoted), image::ImageFormat::Png).unwrap();
+    let text = format!("# T\n![](ok.png)\n![](../secret.png)\n![](pipe.png)\n![]({quoted})\n");
+    let html = crate::markdown::to_html("T", &text, Some(&doc));
+    assert_eq!(html.matches("data:image/png;base64,").count(), 2);
+    assert!(!html.contains("\" onerror=\""), "attribute not escaped");
+    assert!(html.contains("q&quot; onerror=&quot;x.png"));
+    let epub = crate::export::epub("T", &text, 1, &doc).unwrap();
+    // each picture's name appears twice in a zip (local header and directory)
+    assert_eq!(epub.windows(16).filter(|w| *w == b"OEBPS/images/img").count(), 4);
+    assert!(!epub.windows(10).any(|w| w == b"\" onerror="));
+}

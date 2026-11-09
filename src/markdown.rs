@@ -502,8 +502,9 @@ fn base64(data: &[u8]) -> String {
 
 /// `dir` is the note's attachment folder: pictures are embedded in the page.
 pub fn to_html(title: &str, text: &str, dir: Option<&std::path::Path>) -> String {
+    /// Escapes text and attribute values alike (quotes included).
     fn esc(s: &str) -> String {
-        s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+        s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&#39;")
     }
     fn inline(s: &str) -> String {
         let s = esc(s);
@@ -564,12 +565,13 @@ pub fn to_html(title: &str, text: &str, dir: Option<&std::path::Path>) -> String
             in_list = false;
         }
         if let Some(name) = image_ref(t) {
-            let bytes = dir.and_then(|d| std::fs::read(d.join(name)).ok());
-            match bytes {
-                Some(b) => {
-                    let lower = name.to_lowercase();
-                    let mime = if lower.ends_with(".jpg") || lower.ends_with(".jpeg") { "image/jpeg" } else { "image/png" };
-                    body.push_str(&format!("<p><img src=\"data:{mime};base64,{}\" alt=\"{}\" style=\"max-width:100%\"></p>\n", base64(&b), esc(name)));
+            // only pictures inside the note's own folder are embedded
+            let picture = dir
+                .and_then(|d| crate::safefs::confine(d, name))
+                .and_then(|p| crate::attach::read_picture(&p, crate::safefs::Links::Refuse));
+            match picture {
+                Some((b, kind)) => {
+                    body.push_str(&format!("<p><img src=\"data:{};base64,{}\" alt=\"{}\" style=\"max-width:100%\"></p>\n", kind.mime(), base64(&b), esc(name)));
                 }
                 None => body.push_str(&format!("<p><em>{}</em></p>\n", esc(&crate::export::image_placeholder(name)))),
             }

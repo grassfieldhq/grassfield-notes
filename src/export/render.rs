@@ -88,7 +88,9 @@ fn layout(text: &str, g: &Geometry, fonts: &Fonts, dir: &Path, images: &mut Vec<
 
     for b in blocks(text) {
         if let Block::Image(name) = &b {
-            if let Ok(img) = image::open(dir.join(name)) {
+            // only pictures inside the note's own folder
+            let picture = crate::safefs::confine(dir, name).and_then(|p| crate::attach::load_picture(&p, crate::safefs::Links::Refuse));
+            if let Some(img) = picture {
                 let img = img.to_rgb8();
                 let (iw, ih) = (img.width() as f32, img.height() as f32);
                 let mut w = (iw * g.px).min(usable);
