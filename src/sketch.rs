@@ -52,6 +52,71 @@ pub struct Sketch {
     pub strokes: Vec<Stroke>,
 }
 
+/// Most points a sketch may hold.
+pub const MAX_POINTS: usize = 100_000;
+/// Widest line a sketch may draw.
+pub const MAX_WIDTH: f32 = 400.0;
+/// Most pixel visits drawing a sketch may take (each segment visits the pixels of its own
+/// box): hand-drawn sketches use a few million, a hostile one is refused.
+const MAX_WORK: f64 = 1.0e8;
+
+impl Sketch {
+    /// Sketch data may come from a synced repository: keep it within safe bounds. The size is
+    /// clamped to the canvas, widths and points to finite values near it, and a sketch with
+    /// too many points or too much drawing work is refused.
+    pub fn sanitized(mut self) -> Option<Sketch> {
+        if !self.width.is_finite() || !self.height.is_finite() {
+            return None;
+        }
+        self.width = self.width.round().clamp(1.0, CANVAS_W);
+        self.height = self.height.round().clamp(1.0, CANVAS_H);
+        let (w, h) = (self.width, self.height);
+        let mut points = 0;
+        let mut work = 0.0f64;
+        for st in &mut self.strokes {
+            if !st.width.is_finite() {
+                return None;
+            }
+            st.width = st.width.clamp(0.1, MAX_WIDTH);
+            st.points.retain(|p| p[0].is_finite() && p[1].is_finite());
+            for p in &mut st.points {
+                p[0] = p[0].clamp(-MAX_WIDTH, w + MAX_WIDTH);
+                p[1] = p[1].clamp(-MAX_WIDTH, h + MAX_WIDTH);
+            }
+            points += st.points.len();
+            if points > MAX_POINTS {
+                return None;
+            }
+            for (a, b) in segments(st) {
+                let (x0, y0, x1, y1) = seg_box(a, b, st.width / 2.0, w as u32, h as u32);
+                work += (x1.saturating_sub(x0) as f64 + 1.0) * (y1.saturating_sub(y0) as f64 + 1.0);
+            }
+            if work > MAX_WORK {
+                return None;
+            }
+        }
+        Some(self)
+    }
+}
+
+/// The segments of a stroke (a single point is a segment of length zero).
+fn segments(st: &Stroke) -> Vec<([f32; 2], [f32; 2])> {
+    if st.points.len() == 1 {
+        vec![(st.points[0], st.points[0])]
+    } else {
+        st.points.windows(2).map(|w| (w[0], w[1])).collect()
+    }
+}
+
+/// The pixels a segment can touch, inside a `w` x `h` canvas (inclusive bounds).
+fn seg_box(a: [f32; 2], b: [f32; 2], half: f32, w: u32, h: u32) -> (u32, u32, u32, u32) {
+    let x0 = ((a[0].min(b[0]) - half - 1.0).floor().max(0.0)) as u32;
+    let y0 = ((a[1].min(b[1]) - half - 1.0).floor().max(0.0)) as u32;
+    let x1 = ((a[0].max(b[0]) + half + 1.0).ceil().min(w as f32 - 1.0)).max(0.0) as u32;
+    let y1 = ((a[1].max(b[1]) + half + 1.0).ceil().min(h as f32 - 1.0)).max(0.0) as u32;
+    (x0, y0, x1, y1)
+}
+
 impl Default for Sketch {
     fn default() -> Self {
         Self { width: CANVAS_W, height: CANVAS_H, strokes: Vec::new() }
@@ -66,8 +131,8 @@ pub fn sidecar(png: &Path) -> PathBuf {
 }
 
 pub fn load(png: &Path) -> Option<Sketch> {
-    let s = std::fs::read_to_string(sidecar(png)).ok()?;
-    serde_json::from_str(&s).ok()
+    let bytes = crate::safefs::read_regular(&sidecar(png), crate::safefs::Links::Refuse, 16 * 1024 * 1024).ok()?;
+    serde_json::from_slice::<Sketch>(&bytes).ok()?.sanitized()
 }
 
 fn seg_dist2(px: f32, py: f32, a: [f32; 2], b: [f32; 2]) -> f32 {
@@ -89,52 +154,45 @@ pub fn hits(stroke: &Stroke, p: [f32; 2], radius: f32) -> bool {
     }
 }
 
-/// Draw the sketch on white paper.
+/// Draw the sketch on white paper. The size is clamped to the canvas, so a sketch from
+/// elsewhere can never ask for a huge picture.
 pub fn rasterize(sk: &Sketch) -> image::RgbaImage {
-    let (w, h) = (sk.width as u32, sk.height as u32);
+    let w = (sk.width.round() as u32).clamp(1, CANVAS_W as u32);
+    let h = (sk.height.round() as u32).clamp(1, CANVAS_H as u32);
     let mut img = image::RgbaImage::from_pixel(w, h, image::Rgba([255, 255, 255, 255]));
+    let mut cover = vec![0f32; (w * h) as usize];
     for st in &sk.strokes {
         if st.tool == Tool::Eraser || st.points.is_empty() {
             continue;
         }
-        let half = st.width / 2.0;
-        let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
-        for p in &st.points {
-            x0 = x0.min(p[0]);
-            y0 = y0.min(p[1]);
-            x1 = x1.max(p[0]);
-            y1 = y1.max(p[1]);
-        }
-        let bx0 = ((x0 - half - 1.0).floor().max(0.0)) as u32;
-        let by0 = ((y0 - half - 1.0).floor().max(0.0)) as u32;
-        let bx1 = ((x1 + half + 1.0).ceil().min(w as f32 - 1.0)).max(0.0) as u32;
-        let by1 = ((y1 + half + 1.0).ceil().min(h as f32 - 1.0)).max(0.0) as u32;
-        let alpha = st.tool.alpha();
-        let segs: Vec<([f32; 2], [f32; 2])> = if st.points.len() == 1 {
-            vec![(st.points[0], st.points[0])]
-        } else {
-            st.points.windows(2).map(|w| (w[0], w[1])).collect()
-        };
-        for y in by0..=by1 {
-            for x in bx0..=bx1 {
-                let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
-                let mut d2 = f32::MAX;
-                for (a, b) in &segs {
-                    d2 = d2.min(seg_dist2(px, py, *a, *b));
-                    if d2 == 0.0 {
-                        break;
+        let half = st.width.clamp(0.0, MAX_WIDTH) / 2.0;
+        // one coverage value per pixel and stroke (the closest segment wins), so
+        // translucent ink doesn't pile up; each segment only visits the pixels of its box
+        let mut touched: Vec<u32> = Vec::new();
+        for (a, b) in segments(st) {
+            let (x0, y0, x1, y1) = seg_box(a, b, half, w, h);
+            for y in y0..=y1 {
+                for x in x0..=x1 {
+                    let d2 = seg_dist2(x as f32 + 0.5, y as f32 + 0.5, a, b);
+                    let c = (half + 0.5 - d2.sqrt()).clamp(0.0, 1.0);
+                    let i = (y * w + x) as usize;
+                    if c > cover[i] {
+                        if cover[i] == 0.0 {
+                            touched.push(i as u32);
+                        }
+                        cover[i] = c;
                     }
                 }
-                // one coverage value per stroke, so translucent ink doesn't pile up
-                let cover = (half + 0.5 - d2.sqrt()).clamp(0.0, 1.0);
-                if cover <= 0.0 {
-                    continue;
-                }
-                let a = cover * alpha;
-                let p = img.get_pixel_mut(x, y);
-                for i in 0..3 {
-                    p.0[i] = (p.0[i] as f32 * (1.0 - a) + st.color[i] as f32 * a).round() as u8;
-                }
+            }
+        }
+        let alpha = st.tool.alpha();
+        for i in touched {
+            let i = i as usize;
+            let a = cover[i] * alpha;
+            cover[i] = 0.0;
+            let p = img.get_pixel_mut(i as u32 % w, i as u32 / w);
+            for k in 0..3 {
+                p.0[k] = (p.0[k] as f32 * (1.0 - a) + st.color[k] as f32 * a).round() as u8;
             }
         }
     }
@@ -149,4 +207,46 @@ pub fn save(sk: &Sketch, png: &Path) -> std::io::Result<()> {
     rasterize(sk).save(png).map_err(std::io::Error::other)?;
     let json = serde_json::to_string(sk).map_err(std::io::Error::other)?;
     std::fs::write(sidecar(png), json)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stroke(points: Vec<[f32; 2]>, width: f32) -> Stroke {
+        Stroke { tool: Tool::Pen, color: [0, 0, 0], width, points }
+    }
+
+    #[test]
+    fn sketches_from_elsewhere_stay_within_bounds() {
+        // any size: clamped to the canvas, so saving never asks for a huge picture
+        let huge = Sketch { width: 1.0e9, height: 3.0e8, strokes: vec![stroke(vec![[1.0e12, -5.0], [10.0, 10.0]], 1.0e6)] };
+        let ok = huge.sanitized().unwrap();
+        assert_eq!((ok.width, ok.height), (CANVAS_W, CANVAS_H));
+        assert_eq!(ok.strokes[0].width, MAX_WIDTH);
+        assert!(ok.strokes[0].points[0][0] <= CANVAS_W + MAX_WIDTH);
+        let img = rasterize(&Sketch { width: 1.0e9, height: 1.0e9, strokes: vec![] });
+        assert_eq!((img.width(), img.height()), (CANVAS_W as u32, CANVAS_H as u32));
+        // too many points, or too much drawing work: refused
+        let many = Sketch { strokes: vec![stroke(vec![[1.0, 1.0]; MAX_POINTS + 1], 2.0)], ..Default::default() };
+        assert!(many.sanitized().is_none());
+        let diagonals: Vec<[f32; 2]> = (0..2000).map(|k| if k % 2 == 0 { [0.0, 0.0] } else { [CANVAS_W, CANVAS_H] }).collect();
+        assert!(Sketch { strokes: vec![stroke(diagonals, 2.0)], ..Default::default() }.sanitized().is_none());
+        // a hand-drawn sketch is kept as it is
+        let line: Vec<[f32; 2]> = (0..500).map(|k| [100.0 + k as f32, 200.0 + (k as f32 / 10.0).sin() * 30.0]).collect();
+        let normal = Sketch { strokes: vec![stroke(line, 4.0); 40], ..Default::default() };
+        assert_eq!(normal.clone().sanitized(), Some(normal));
+    }
+
+    #[test]
+    fn a_hostile_sidecar_is_refused_on_load() {
+        let dir = std::env::temp_dir().join(format!("gf-sketch-bounds-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = dir.join("croquis.png");
+        std::fs::write(sidecar(&png), r#"{"width":1e9,"height":1e9,"strokes":[]}"#).unwrap();
+        let sk = load(&png).unwrap();
+        assert_eq!((sk.width, sk.height), (CANVAS_W, CANVAS_H));
+        std::fs::write(sidecar(&png), r#"{"width":1e999,"height":5,"strokes":[]}"#).unwrap();
+        assert!(load(&png).is_none());
+    }
 }
