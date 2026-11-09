@@ -21,6 +21,8 @@ pub(super) struct OpenFile {
     crlf: bool,
     error: Option<String>,
     cache: Option<(u64, egui::text::LayoutJob)>,
+    /// styling of each line, so a keystroke only restyles its line
+    lines: markdown::LineCache,
     uid: u64,
 }
 
@@ -119,6 +121,7 @@ impl OpenFile {
             crlf,
             error: None,
             cache: None,
+            lines: Default::default(),
             uid,
         })
     }
@@ -820,6 +823,7 @@ impl GrassApp {
                     ui.add_space(side);
                     let plain = f.plain;
                     let cache = &mut f.cache;
+                    let lines = &mut f.lines;
                     let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap: f32| {
                         use std::hash::{Hash, Hasher};
                         let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -830,7 +834,7 @@ impl GrassApp {
                         let job = match cache {
                             Some((k, job)) if *k == key => job.clone(),
                             _ => {
-                                let job = if plain { markdown::plain_job(buf.as_str(), &style, wrap) } else { markdown::layout_job(buf.as_str(), &style, wrap) };
+                                let job = if plain { markdown::plain_job(buf.as_str(), &style, wrap) } else { markdown::layout_job_cached(buf.as_str(), &style, wrap, lines) };
                                 *cache = Some((key, job.clone()));
                                 job
                             }

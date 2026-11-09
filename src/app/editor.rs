@@ -469,6 +469,7 @@ impl GrassApp {
             settings.line_spacing.to_bits(),
         );
         let cache = &mut self.layout_cache;
+        let lines = &mut self.line_cache;
         egui::ScrollArea::vertical()
             .id_salt(("editor-scroll", id))
             .auto_shrink([false, false])
@@ -502,7 +503,7 @@ impl GrassApp {
                         let job = match cache {
                             Some((k, job)) if *k == key => job.clone(),
                             _ => {
-                                let job = markdown::layout_job(buf.as_str(), &style, wrap);
+                                let job = markdown::layout_job_cached(buf.as_str(), &style, wrap, lines);
                                 *cache = Some((key, job.clone()));
                                 job
                             }

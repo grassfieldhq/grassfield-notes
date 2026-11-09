@@ -6,7 +6,7 @@ use crate::theme::Theme;
 use eframe::egui::text::{ByteIndex, LayoutJob, LayoutSection, TextFormat};
 use eframe::egui::{Color32, FontFamily, FontId, Stroke};
 
-#[derive(Clone, Copy, Default, PartialEq)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
 struct Flags {
     bold: bool,
     italic: bool,
@@ -191,8 +191,10 @@ fn block_prefix(line: &str) -> (usize, Flags, Vec<(usize, usize, Flags)>) {
 
 /// Lines longer than this (in bytes) are styled up to here and shown plain after it.
 pub const MAX_STYLED_LINE: usize = 20_000;
-/// Texts larger than this (in bytes) are shown without any Markdown styling.
-pub const MAX_STYLED_TEXT: usize = 1024 * 1024;
+/// Texts larger than this (in bytes) are shown without any Markdown styling. With the line
+/// cache, a keystroke in the worst text under this size (hostile lines up to the line cap)
+/// costs a few tens of milliseconds.
+pub const MAX_STYLED_TEXT: usize = 512 * 1024;
 
 /// For every index `i`, the first index `j >= i` where `hit(j)` holds (`n` when none).
 /// Lets each search below jump straight to its answer, so a line is styled in linear time.
@@ -387,7 +389,50 @@ fn floor_boundary(s: &str, max: usize) -> usize {
     i
 }
 
+/// The inline styling of each line, kept from one layout to the next: while typing, only
+/// the line that changed is styled again, so a keystroke never restyles the whole text.
+/// (It holds styling runs, not formats, so a change of theme or size needs no reset.)
+#[derive(Default)]
+pub struct LineCache {
+    lines: HashMap<u64, std::rc::Rc<Vec<(usize, usize, Flags)>>>,
+}
+
+impl LineCache {
+    /// Runs of equal inline flags for one line's content, from the cache when possible.
+    fn runs(&self, next: &mut HashMap<u64, std::rc::Rc<Vec<(usize, usize, Flags)>>>, content: &str, base: Flags) -> std::rc::Rc<Vec<(usize, usize, Flags)>> {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        content.hash(&mut h);
+        base.hash(&mut h);
+        let key = h.finish();
+        if let Some(r) = next.get(&key).or_else(|| self.lines.get(&key)) {
+            let r = r.clone();
+            next.insert(key, r.clone());
+            return r;
+        }
+        let mut runs: Vec<(usize, usize, Flags)> = Vec::new();
+        let fl = inline_flags(content, base);
+        for (idx, (b, f)) in fl.iter().enumerate() {
+            let e = fl.get(idx + 1).map(|x| x.0).unwrap_or(content.len());
+            match runs.last_mut() {
+                Some(last) if last.1 == *b && last.2 == *f => last.1 = e,
+                _ => runs.push((*b, e, *f)),
+            }
+        }
+        let r = std::rc::Rc::new(runs);
+        next.insert(key, r.clone());
+        r
+    }
+}
+
+/// `layout_job_cached` without a cache (the window always keeps one).
+#[cfg(test)]
 pub fn layout_job(text: &str, style: &MdStyle, wrap_width: f32) -> LayoutJob {
+    layout_job_cached(text, style, wrap_width, &mut LineCache::default())
+}
+
+/// `layout_job`, reusing the styling of lines that did not change since the last call.
+pub fn layout_job_cached(text: &str, style: &MdStyle, wrap_width: f32, cache: &mut LineCache) -> LayoutJob {
     if text.len() > MAX_STYLED_TEXT {
         return plain_job(text, style, wrap_width);
     }
@@ -396,14 +441,34 @@ pub fn layout_job(text: &str, style: &MdStyle, wrap_width: f32) -> LayoutJob {
         ..Default::default()
     };
     job.wrap.max_width = wrap_width;
+    let mut next_lines = HashMap::new();
+    // each distinct set of flags gets its format once, and equal formats share one index,
+    // so sections merge by comparing indices instead of whole formats
+    let mut flag_set: Vec<(Flags, usize)> = Vec::new();
+    let mut formats: Vec<TextFormat> = Vec::new();
+    // (number of sections, format index) after the last push: a section added elsewhere
+    // (a picture row) changes the count, so it is never extended by mistake
+    let mut last_push = (usize::MAX, usize::MAX);
 
-    let push = |job: &mut LayoutJob, start: usize, end: usize, f: Flags| {
+    let mut push = |job: &mut LayoutJob, start: usize, end: usize, f: Flags| {
         if start >= end {
             return;
         }
-        let format = style.format(f);
+        let idx = match flag_set.iter().find(|x| x.0 == f) {
+            Some(x) => x.1,
+            None => {
+                let format = style.format(f);
+                let i = formats.iter().position(|x| *x == format).unwrap_or_else(|| {
+                    formats.push(format);
+                    formats.len() - 1
+                });
+                flag_set.push((f, i));
+                i
+            }
+        };
+        let n = job.sections.len();
         if let Some(last) = job.sections.last_mut() {
-            if last.byte_range.end.0 == start && last.format == format {
+            if last.byte_range.end.0 == start && last_push == (n, idx) {
                 last.byte_range.end = ByteIndex(end);
                 return;
             }
@@ -411,8 +476,9 @@ pub fn layout_job(text: &str, style: &MdStyle, wrap_width: f32) -> LayoutJob {
         job.sections.push(LayoutSection {
             leading_space: 0.0,
             byte_range: ByteIndex(start)..ByteIndex(end),
-            format,
+            format: formats[idx].clone(),
         });
+        last_push = (n + 1, idx);
     };
 
     let mut offset = 0;
@@ -463,9 +529,7 @@ pub fn layout_job(text: &str, style: &MdStyle, wrap_width: f32) -> LayoutJob {
         let content = &line[plen..];
         // very long lines: style the start, show the rest plain
         let styled = floor_boundary(content, MAX_STYLED_LINE);
-        let fl = inline_flags(&content[..styled], base);
-        for (idx, (b, f)) in fl.iter().enumerate() {
-            let e = fl.get(idx + 1).map(|x| x.0).unwrap_or(styled);
+        for (b, e, f) in cache.runs(&mut next_lines, &content[..styled], base).iter() {
             push(&mut job, offset + plen + b, offset + plen + e, *f);
         }
         push(&mut job, offset + plen + styled, offset + line.len(), base);
@@ -474,6 +538,8 @@ pub fn layout_job(text: &str, style: &MdStyle, wrap_width: f32) -> LayoutJob {
         }
         offset += raw.len();
     }
+    // lines no longer in the text are forgotten
+    cache.lines = next_lines;
     if job.sections.is_empty() {
         // empty text still needs a format for the cursor height
         job.sections.push(LayoutSection {
@@ -673,6 +739,39 @@ mod tests {
         let huge = "# titre\n".repeat(MAX_STYLED_TEXT / 8 + 1);
         let job = layout_job(&huge, &st, 600.0);
         assert_eq!(job.sections.len(), 1);
+    }
+
+    /// Just under the caps: about 26 different hostile lines of 19.8 KB (512 KiB). Styling
+    /// it all once takes a while; a keystroke afterwards only restyles the line it changed.
+    #[test]
+    fn a_keystroke_only_restyles_its_line() {
+        let st = style();
+        let line: String = hostile_line().chars().take(19_790).collect();
+        let mut text = String::new();
+        let mut k = 0;
+        // every line different, so nothing is shared between them
+        while text.len() + line.len() + 12 < MAX_STYLED_TEXT {
+            text.push_str(&format!("{k:06} {line}\n"));
+            k += 1;
+        }
+        let mut cache = LineCache::default();
+        let t = std::time::Instant::now();
+        let cold = layout_job_cached(&text, &st, 600.0, &mut cache);
+        let cold_t = t.elapsed();
+        // type one letter in the middle of the text
+        let mid = text.len() / 2;
+        let mid = (mid..text.len()).find(|i| text.is_char_boundary(*i)).unwrap();
+        text.insert(mid, 'x');
+        let t = std::time::Instant::now();
+        let warm = layout_job_cached(&text, &st, 600.0, &mut cache);
+        let warm_t = t.elapsed();
+        eprintln!("~512 KiB of hostile lines: first styling {cold_t:?}, keystroke {warm_t:?}");
+        assert!(warm_t < std::time::Duration::from_millis(150), "a keystroke took {warm_t:?}");
+        assert!(cold.sections.len() > 1000);
+        // the same result as styling from scratch
+        let fresh = layout_job(&text, &st, 600.0);
+        assert_eq!(warm.sections.len(), fresh.sections.len());
+        assert!(warm.sections.iter().zip(&fresh.sections).all(|(a, b)| a.byte_range == b.byte_range && a.format == b.format));
     }
 
     #[test]

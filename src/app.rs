@@ -107,6 +107,8 @@ pub struct GrassApp {
     cursor: Option<(usize, usize)>,
     cursor_note: Option<u64>,
     layout_cache: Option<(u64, egui::text::LayoutJob)>,
+    /// styling of each line of the open note, so a keystroke only restyles its line
+    line_cache: markdown::LineCache,
     pending_cursor: Option<(usize, usize)>,
     focus_editor: bool,
     focus_search: bool,
@@ -203,6 +205,7 @@ impl GrassApp {
             cursor: None,
             cursor_note: None,
             layout_cache: None,
+            line_cache: Default::default(),
             pending_cursor: None,
             focus_editor: false,
             focus_search: false,
