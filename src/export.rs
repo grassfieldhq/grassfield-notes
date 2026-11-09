@@ -195,14 +195,11 @@ pub fn export_note_with(note: &Note, format: Format, dir: &Path, pics: &Path) ->
     export_note_at(note, format, &path, pics)
 }
 
-/// Write one note at exactly `path` (chosen by the user in a Save panel).
+/// Write one note at exactly `path`, the name chosen by the user in a Save panel. The name
+/// is kept as given (no extension is added), so no other file than the one the panel
+/// asked about is ever written.
 pub fn export_note_at(note: &Note, format: Format, path: &Path, pics: &Path) -> std::io::Result<PathBuf> {
-    let mut path = path.to_path_buf();
-    if path.extension().map(|e| e.to_string_lossy().to_lowercase()) != Some(format.ext().to_string()) {
-        let mut s = path.into_os_string();
-        s.push(format!(".{}", format.ext()));
-        path = PathBuf::from(s);
-    }
+    let path = path.to_path_buf();
     let title = note.title();
     match format {
         Format::Txt => {

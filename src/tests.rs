@@ -519,3 +519,20 @@ fn pictures_never_leave_the_document_folder() {
     assert_eq!(epub.windows(16).filter(|w| *w == b"OEBPS/images/img").count(), 4);
     assert!(!epub.windows(10).any(|w| w == b"\" onerror="));
 }
+
+/// The Save panel's choice is kept as given: no extension is added, so no other file
+/// than the one the panel asked about is written.
+#[test]
+fn an_export_keeps_the_chosen_name() {
+    let dir = std::env::temp_dir().join(format!("gf-export-name-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let other = dir.join("notes.html");
+    std::fs::write(&other, "keep me").unwrap();
+    let lib = Library::sample();
+    let n = &lib.notes[0];
+    let p = crate::export::export_note_at(n, crate::export::Format::Html, &dir.join("notes"), &dir).unwrap();
+    assert_eq!(p, dir.join("notes"));
+    assert!(std::fs::read_to_string(&p).unwrap().contains("<html"));
+    assert_eq!(std::fs::read_to_string(&other).unwrap(), "keep me");
+}

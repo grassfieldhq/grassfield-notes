@@ -610,7 +610,12 @@ impl GrassApp {
     /// Export notes: the system's Save panel picks the file (or the folder, for several
     /// notes) when there is one; otherwise they go to the default export folder.
     fn export(&mut self, ctx: &egui::Context, ids: &[u64], format: Format) {
-        if self.screenshot.is_none() && crate::portal::available() && self.export_panel.is_none() {
+        if self.export_panel.is_some() {
+            // never send this export somewhere the user did not choose
+            self.notify(ctx, crate::i18n::tr("Un export attend déjà que vous choisissiez où l'enregistrer."));
+            return;
+        }
+        if self.screenshot.is_none() && crate::portal::available() {
             let title = crate::i18n::tr("Exporter").to_string();
             let ask = match ids {
                 [one] => match self.lib.get(*one) {

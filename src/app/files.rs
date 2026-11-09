@@ -724,7 +724,9 @@ impl GrassApp {
             self.add_file_to_library(&ctx, i);
         }
         if let Some(fmt) = export_fmt {
-            if self.screenshot.is_none() && crate::portal::available() && self.export_panel.is_none() {
+            if self.export_panel.is_some() {
+                self.notify(&ctx, tr("Un export attend déjà que vous choisissiez où l'enregistrer."));
+            } else if self.screenshot.is_none() && crate::portal::available() {
                 let name = export::file_name(&self.files[i].as_note(), fmt);
                 let rx = crate::portal::ask(&ctx, tr("Exporter").to_string(), crate::portal::Ask::Save { name }, Some(Self::export_dir()));
                 self.export_panel = Some((ExportTarget::File(self.files[i].uid), fmt, rx));
