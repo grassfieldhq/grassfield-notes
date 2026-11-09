@@ -5,7 +5,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Security
+Fixes for the security audit of 2026-11-08; details in [docs/SECURITY-AUDIT-2026-11-08.md](docs/SECURITY-AUDIT-2026-11-08.md).
+- Sync never follows links committed to the repository, and never reads or writes outside its folders.
+- The GitHub token moves to the system keyring and reaches git through `GIT_ASKPASS`, never its command line; a token saved by 1.0.0 is moved at the next start. The data folder is private (0700, library 0600).
+- Styling is linear in the text size and capped; files over 1 MiB open read-only and plain; named pipes are never opened.
+- Web links, and files outside a document's folder, open only after you see them; only pictures and PDFs open in other apps, other attachments are shown in their folder.
+- Picture paths in documents, exports and *Add to my notes* stay inside the document's folder and must be real pictures.
+- Text reading runs two documents at a time, with memory, CPU and time limits.
+- Markdown files are saved atomically with their permissions, never through a link, and a change made by another program is never overwritten without asking (*Keep mine / Keep theirs / Save as*).
+- SSH sync refuses unknown host keys.
+- Renaming tags with letters such as "İ" no longer crashes; note ids can no longer overflow.
+
 ### Added
+- The desktop's own Open and Save panels (XDG desktop portal), with the built-in chooser as a fallback.
 - Release builds for all three systems: a Linux archive with icon and desktop file, a Windows zip, and a universal macOS `Grassfield Notes.app` (Apple Silicon and Intel).
 - Windows: *Open .md files with Grassfield Notes* registers the app in *Open with*.
 - macOS: shortcuts are shown with ⌘.

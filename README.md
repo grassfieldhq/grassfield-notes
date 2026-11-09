@@ -131,10 +131,10 @@ On macOS, `Cmd` replaces `Ctrl`.
 2. Open *Settings → GitHub sync* and paste the repository address.
 3. Choose how to sign in:
    - **HTTPS address** (`https://github.com/you/notes.git`): create a *fine-grained personal access token* with **Contents: read and write** on that repository only, and paste it into the token field.
-   - **SSH address** (`git@github.com:you/notes.git`): your existing SSH key is used, and no token is needed.
+   - **SSH address** (`git@github.com:you/notes.git`): your existing SSH key is used, and no token is needed. Unknown server keys are refused: before the first sync, run `ssh -T git@github.com` once in a terminal, check that the fingerprint matches the one GitHub publishes, and answer `yes`.
 4. Press **Sync now**. On another computer, enter the same repository to get your notes back.
 
-The token is stored in plain text in your local library file, next to your notes. Use a token limited to that one repository.
+The token is kept in your system keyring (the Secret Service on Linux, the Keychain on macOS, the Credential Manager on Windows), never in your notes folder, and git receives it without it ever appearing on a command line. Use a token limited to that one repository. See [SECURITY.md](SECURITY.md) for how sync treats the repository's content.
 
 ### Where your notes are stored
 | System | Folder |
@@ -143,7 +143,9 @@ The token is stored in plain text in your local library file, next to your notes
 | macOS | `~/Library/Application Support/grassfield-notes/` |
 | Windows | `%APPDATA%\grassfield-notes\` |
 
-The folder holds `library.json` (notes and settings), `attachments/` (pictures, sketches, scans) and `sync-repo/` (the local copy used for GitHub sync). Set the `GRASSFIELD_DATA` environment variable to a path like `/path/to/library.json` to use another location. Exports go to `~/Documents/Grassfield Notes/`.
+The folder holds `library.json` (notes and settings), `attachments/` (pictures, sketches, scans) and `sync-repo/` (the local copy used for GitHub sync). It is private to your user account. Set the `GRASSFIELD_DATA` environment variable to a path like `/path/to/library.json` to use another location.
+
+Open, attach and export use your desktop's own Open and Save panels (through the XDG desktop portal on Linux). Without a portal, a built-in chooser is used and exports go to `~/Documents/Grassfield Notes/`.
 
 Only one window edits the notebook at a time. A second window opens read-only and passes added files over to the first one.
 
