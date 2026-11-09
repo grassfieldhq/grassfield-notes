@@ -45,17 +45,6 @@ pub(super) struct ConflictPrompt {
     pub then: AfterConflict,
 }
 
-#[cfg(unix)]
-fn mode_of(m: &std::fs::Metadata) -> u32 {
-    use std::os::unix::fs::PermissionsExt;
-    m.permissions().mode() & 0o777
-}
-
-#[cfg(not(unix))]
-fn mode_of(_: &std::fs::Metadata) -> u32 {
-    0
-}
-
 /// Save a Markdown file.
 ///
 /// Links: the path was resolved once, when the file was opened (`canonicalize` follows
@@ -63,19 +52,19 @@ fn mode_of(_: &std::fs::Metadata) -> u32 {
 /// that path since, saving is refused: a link is never written through, nor silently
 /// replaced.
 ///
-/// The text goes to a temporary file in the same folder, is flushed to disk, then renamed
-/// over the file, which keeps its permissions: a crash or a full disk never leaves a
-/// half-written file. (The renamed file is a new inode: hard links keep the old text.)
+/// How (see `safefs::save_document`): normally a new file with the same mode, owner,
+/// group, extended attributes and ACLs is flushed and renamed over the old one, so a crash
+/// never leaves a half-written file (hard links keep the old text). When that cannot keep
+/// the file as it was (a folder that is not writable, an owner that cannot be given to a
+/// new file), the file is written in place after a private backup of its old content.
+/// A deleted file is written anew.
 fn write_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let mode = match std::fs::symlink_metadata(path) {
+    match std::fs::symlink_metadata(path) {
         Ok(m) if m.file_type().is_symlink() => return Err(tr("Le fichier a été remplacé par un lien : il n'a pas été enregistré.").to_string()),
         Ok(m) if !m.is_file() => return Err(tr("Ce n'est plus un fichier ordinaire : il n'a pas été enregistré.").to_string()),
-        Ok(m) => mode_of(&m),
-        // moved or deleted meanwhile: saving puts it back
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0o644,
-        Err(e) => return Err(e.to_string()),
-    };
-    crate::safefs::write_atomic(path, bytes, mode).map_err(|e| e.to_string())
+        _ => {}
+    }
+    crate::safefs::save_document(path, bytes, &Library::data_dir().join("backups")).map(|_| ()).map_err(|e| e.to_string())
 }
 
 pub(super) fn is_markdown(p: &Path) -> bool {
@@ -1068,6 +1057,53 @@ mod tests {
         assert!(f.save().is_err());
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "cible");
         assert!(std::fs::symlink_metadata(&p).unwrap().file_type().is_symlink());
+    }
+
+    /// A folder that is not writable: the file is written in place (same inode), after a
+    /// backup that is removed once the text is on disk. Extended attributes are kept by a
+    /// normal save.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn saving_keeps_attributes_and_works_in_a_read_only_folder() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let _guard = crate::tests::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let base = std::env::temp_dir().join(format!("gf-save-inplace-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::env::set_var("GRASSFIELD_DATA", base.join("data").join("library.json"));
+        let dir = base.join("doc");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("note.md");
+        std::fs::write(&p, "v1").unwrap();
+        // an extended attribute (where the file system supports them)
+        let name = std::ffi::CString::new("user.grassfield.test").unwrap();
+        let cpath = std::ffi::CString::new(p.to_str().unwrap()).unwrap();
+        let has_xattr = unsafe { libc::setxattr(cpath.as_ptr(), name.as_ptr(), b"kept".as_ptr() as *const libc::c_void, 4, 0) } == 0;
+        let mut f = OpenFile::open(&p, 1).unwrap();
+        f.text = "v2".into();
+        f.save().unwrap();
+        if has_xattr {
+            let mut buf = [0u8; 16];
+            let n = unsafe { libc::getxattr(cpath.as_ptr(), name.as_ptr(), buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+            assert_eq!(&buf[..n.max(0) as usize], b"kept", "extended attribute lost");
+        }
+        // now the folder cannot be written: the save goes in place
+        let ino = std::fs::metadata(&p).unwrap().ino();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        f.text = "v3, longer than before".into();
+        let res = f.save();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        res.unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "v3, longer than before");
+        assert_eq!(std::fs::metadata(&p).unwrap().ino(), ino, "written in place");
+        let backups = base.join("data").join("backups");
+        assert_eq!(std::fs::read_dir(&backups).map(|r| r.count()).unwrap_or(0), 0, "the backup is removed after a good save");
+        f.text = "v4".into();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let res = f.save();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        res.unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "v4", "a shorter text leaves nothing behind");
+        std::env::remove_var("GRASSFIELD_DATA");
     }
 
     #[test]

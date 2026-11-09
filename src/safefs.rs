@@ -208,3 +208,171 @@ pub fn copy_regular(src: &Path, links: Links, dst: &Path, max: u64, mode: u32) -
         Ok(())
     })
 }
+
+/// How `save_document` wrote a file.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Saved {
+    /// a new file renamed over the old one, with its mode, owner, group and attributes
+    Replaced,
+    /// written into the existing file, after a backup of its old content
+    InPlace,
+}
+
+/// Copy the extended attributes of `from` to `to` (on Linux they include POSIX ACLs).
+/// Returns false when one that matters (user attributes, ACLs) could not be copied;
+/// security.* and trusted.* attributes need privileges and are left to the system.
+#[cfg(target_os = "linux")]
+fn copy_xattrs(from: &File, to: &File) -> bool {
+    use std::os::unix::io::AsRawFd;
+    let (src, dst) = (from.as_raw_fd(), to.as_raw_fd());
+    // SAFETY: plain system calls on open descriptors, with buffers of the size they report
+    unsafe {
+        let len = libc::flistxattr(src, std::ptr::null_mut(), 0);
+        if len <= 0 {
+            return len == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOTSUP);
+        }
+        let mut names = vec![0u8; len as usize];
+        let len = libc::flistxattr(src, names.as_mut_ptr() as *mut libc::c_char, names.len());
+        if len < 0 {
+            return false;
+        }
+        for name in names[..len as usize].split(|b| *b == 0).filter(|n| !n.is_empty()) {
+            let Ok(cname) = std::ffi::CString::new(name) else { return false };
+            let matters = !(name.starts_with(b"security.") || name.starts_with(b"trusted."));
+            let size = libc::fgetxattr(src, cname.as_ptr(), std::ptr::null_mut(), 0);
+            if size < 0 {
+                if matters {
+                    return false;
+                }
+                continue;
+            }
+            let mut value = vec![0u8; size as usize];
+            let size = libc::fgetxattr(src, cname.as_ptr(), value.as_mut_ptr() as *mut libc::c_void, value.len());
+            let ok = size >= 0 && libc::fsetxattr(dst, cname.as_ptr(), value.as_ptr() as *const libc::c_void, size as usize, 0) == 0;
+            if !ok && matters {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Save a document the user opened (a Markdown file anywhere on the computer).
+///
+/// Normally: a temporary file in the same folder gets the new text, the old file's mode,
+/// owner and group, and (on Linux) its extended attributes and ACLs; it is flushed and
+/// renamed over the old file, so a crash never leaves a half-written file.
+///
+/// When that cannot keep the file as it was (the folder is not writable so no temporary
+/// file can be made there, or the owner, group or attributes cannot be given to a new
+/// file), the text is written into the existing file instead, after its old content is
+/// copied into `backups` (a private folder); the copy is removed once the new text is
+/// safely on disk, and kept (and named in the error) if writing fails.
+///
+/// `path` must be a regular file or missing: the caller refuses links.
+pub fn save_document(path: &Path, bytes: &[u8], backups: &Path) -> std::io::Result<Saved> {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(m) if m.is_file() => m,
+        Ok(_) => return Err(invalid("not a regular file")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return write_atomic(path, bytes, 0o644).map(|_| Saved::Replaced);
+        }
+        Err(e) => return Err(e),
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let mode = meta.mode() & 0o7777;
+        let replaced = (|| -> std::io::Result<bool> {
+            let (tmp, mut f) = match create_temp_beside(path, 0o600) {
+                Ok(t) => t,
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return Ok(false),
+                Err(e) => return Err(e),
+            };
+            let keep = (|| -> std::io::Result<bool> {
+                std::io::Write::write_all(&mut f, bytes)?;
+                use std::os::unix::io::AsRawFd;
+                // SAFETY: fchown on our own open descriptor
+                let owned = unsafe { libc::fchown(f.as_raw_fd(), meta.uid(), meta.gid()) } == 0;
+                if !owned {
+                    return Ok(false);
+                }
+                #[cfg(target_os = "linux")]
+                {
+                    let old = open_regular(path, Links::Refuse)?;
+                    if !copy_xattrs(&old, &f) {
+                        return Ok(false);
+                    }
+                }
+                use std::os::unix::fs::PermissionsExt;
+                f.set_permissions(std::fs::Permissions::from_mode(mode))?;
+                f.sync_all()?;
+                Ok(true)
+            })();
+            match keep {
+                Ok(true) => {
+                    drop(f);
+                    if let Err(e) = std::fs::rename(&tmp, path) {
+                        let _ = std::fs::remove_file(&tmp);
+                        return Err(e);
+                    }
+                    if let Some(dir) = path.parent() {
+                        if let Ok(d) = File::open(dir) {
+                            let _ = d.sync_all();
+                        }
+                    }
+                    Ok(true)
+                }
+                other => {
+                    let _ = std::fs::remove_file(&tmp);
+                    other
+                }
+            }
+        })()?;
+        if replaced {
+            return Ok(Saved::Replaced);
+        }
+        write_in_place(path, &meta, bytes, backups)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (meta, backups);
+        write_atomic(path, bytes, 0o644).map(|_| Saved::Replaced)
+    }
+}
+
+/// Write into the existing file (same inode, so owner, group, ACLs and attributes stay),
+/// after a private backup of its old content.
+#[cfg(unix)]
+fn write_in_place(path: &Path, meta: &std::fs::Metadata, bytes: &[u8], backups: &Path) -> std::io::Result<Saved> {
+    use std::io::{Seek, Write};
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(backups)?;
+    if !is_real_dir(backups) {
+        return Err(invalid("backups is not a folder"));
+    }
+    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let backup = backups.join(format!("{name}.{}-{seq}.bak", std::process::id()));
+    let old = read_regular(path, Links::Refuse, 1 << 30)?;
+    write_new(&backup, &old, 0o600)?;
+    let done = (|| -> std::io::Result<()> {
+        let mut f = std::fs::OpenOptions::new().write(true).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(path)?;
+        let now = f.metadata()?;
+        // still the same regular file that was checked
+        if !now.is_file() || now.ino() != meta.ino() || now.dev() != meta.dev() {
+            return Err(invalid("the file changed while saving"));
+        }
+        f.seek(std::io::SeekFrom::Start(0))?;
+        f.write_all(bytes)?;
+        f.set_len(bytes.len() as u64)?;
+        f.sync_all()
+    })();
+    match done {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&backup);
+            Ok(Saved::InPlace)
+        }
+        Err(e) => Err(std::io::Error::new(e.kind(), format!("{e} (old content kept in {})", backup.display()))),
+    }
+}
