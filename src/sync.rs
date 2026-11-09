@@ -51,15 +51,81 @@ pub fn repo_dir() -> PathBuf {
     Library::data_dir().join("sync-repo")
 }
 
-/// Set (with the token in `TOKEN_ENV`) when git runs this program to ask for credentials.
+/// Set when git runs this program to ask for credentials.
 pub const ASKPASS_ENV: &str = "GRASSFIELD_NOTES_ASKPASS";
-const TOKEN_ENV: &str = "GRASSFIELD_NOTES_GIT_TOKEN";
+/// The path of the file holding the token (never the token itself).
+const TOKEN_FILE_ENV: &str = "GRASSFIELD_NOTES_TOKEN_FILE";
+/// Version 1.0.1 drafts passed the token itself in this variable; it is always cleared.
+const OLD_TOKEN_ENV: &str = "GRASSFIELD_NOTES_GIT_TOKEN";
 const HOST_ENV: &str = "GRASSFIELD_NOTES_GIT_HOST";
 
 /// How git signs in for one sync: the token, and the only server it may be given to.
 pub(crate) struct Auth {
     token: String,
     host: String,
+    /// where the askpass helper reads the token during this sync
+    file: Option<TokenFile>,
+}
+
+/// The token, for the askpass helper only: a 0600 file in a 0700 folder of the user's
+/// runtime directory (or of the private data folder), removed when the sync ends. git and
+/// the programs it starts (hooks, filters, ssh) only ever see the file's path.
+pub(crate) struct TokenFile {
+    path: PathBuf,
+}
+
+impl TokenFile {
+    fn create(token: &str) -> std::io::Result<TokenFile> {
+        // the runtime directory first (memory only, private to the user), else the data folder
+        let mut last = std::io::Error::other("no private folder");
+        for base in dirs::runtime_dir().into_iter().chain([Library::data_dir()]) {
+            match Self::create_in(&base.join("grassfield-notes"), token) {
+                Ok(f) => return Ok(f),
+                Err(e) => last = e,
+            }
+        }
+        Err(last)
+    }
+
+    fn create_in(dir: &Path, token: &str) -> std::io::Result<TokenFile> {
+        let dir = dir.to_path_buf();
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        builder.create(&dir)?;
+        if !safefs::is_real_dir(&dir) {
+            return Err(std::io::Error::other("not a folder"));
+        }
+        #[cfg(unix)]
+        {
+            // a folder anyone else could enter is not used
+            use std::os::unix::fs::MetadataExt;
+            let meta = std::fs::symlink_metadata(&dir)?;
+            if meta.uid() != unsafe { libc::geteuid() } || meta.mode() & 0o077 != 0 {
+                return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "token folder is not private"));
+            }
+        }
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = dir.join(format!("askpass-{}-{seq}", std::process::id()));
+        safefs::write_new(&path, token.as_bytes(), 0o600)?;
+        Ok(TokenFile { path })
+    }
+}
+
+impl Drop for TokenFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// The token the askpass helper was pointed at.
+fn token_from_file(path: &Path) -> String {
+    safefs::read_regular(path, Links::Refuse, 64 * 1024)
+        .ok()
+        .and_then(|b| String::from_utf8(b).ok())
+        .unwrap_or_default()
 }
 
 /// What kind of address a repository has.
@@ -101,12 +167,13 @@ fn url_host(url: &str) -> String {
     authority.rsplit('@').next().unwrap_or("").to_ascii_lowercase()
 }
 
-/// The askpass helper: git asks "Username for '…':" then "Password for '…':".
-/// The token travels in the environment of git and its helpers, which only the same user
-/// can read, never on a command line that `ps` shows to everyone.
+/// The askpass helper: git asks "Username for '…':" then "Password for '…':". The token is
+/// read from the private file named in the environment: it is never on a command line that
+/// `ps` shows to everyone, nor in the environment of the programs git starts.
 pub fn askpass(prompt: &str) -> i32 {
     let env = |k| std::env::var(k).unwrap_or_default();
-    match askpass_answer(prompt, &env(TOKEN_ENV), &env(HOST_ENV)) {
+    let token = std::env::var_os(TOKEN_FILE_ENV).map(|p| token_from_file(Path::new(&p))).unwrap_or_default();
+    match askpass_answer(prompt, &token, &env(HOST_ENV)) {
         Some(answer) => {
             println!("{answer}");
             0
@@ -140,13 +207,16 @@ fn git_command(dir: &Path, args: &[&str], auth: &Auth) -> std::process::Command 
     c.current_dir(dir)
         // a link committed to the repository is checked out as a plain file, never as a link
         .args(["-c", "core.symlinks=false"]);
-    if !auth.token.is_empty() {
+    c.env_remove(OLD_TOKEN_ENV).env_remove(TOKEN_FILE_ENV);
+    // only the steps that talk to the server may sign in, and only through the file
+    let network = matches!(args.first(), Some(&"fetch") | Some(&"push"));
+    if let (true, Some(file)) = (network, &auth.file) {
         if let Ok(exe) = std::env::current_exe() {
             // no credential helper may store the token (some write it to a plain file)
             c.args(["-c", "credential.helper="])
                 .env("GIT_ASKPASS", exe)
                 .env(ASKPASS_ENV, "1")
-                .env(TOKEN_ENV, &auth.token)
+                .env(TOKEN_FILE_ENV, &file.path)
                 .env(HOST_ENV, &auth.host);
         }
     }
@@ -430,8 +500,11 @@ pub(crate) fn run(settings: SyncSettings, notes: Vec<Note>, synced: BTreeSet<u64
     // the token is only ever used over https; other schemes than https, SSH and a local
     // folder are refused before anything is sent
     let auth = match remote_kind(&url) {
-        Remote::Https(host) => Auth { token: token.clone(), host },
-        Remote::Ssh | Remote::Local => Auth { token: String::new(), host: String::new() },
+        Remote::Https(host) if !token.is_empty() => match TokenFile::create(&token) {
+            Ok(file) => Auth { token: token.clone(), host, file: Some(file) },
+            Err(e) => return fail(crate::i18n::trf("Le jeton n'a pas pu être transmis à git : {e}", &[("e", &e)])),
+        },
+        Remote::Https(_) | Remote::Ssh | Remote::Local => Auth { token: String::new(), host: String::new(), file: None },
         Remote::Refused(scheme) => {
             return fail(crate::i18n::trf(
                 "Adresse refusée ({0}://) : seules les adresses https:// et SSH (git@…) sont acceptées, pour que vos notes et votre jeton ne circulent jamais en clair.",
@@ -567,25 +640,51 @@ mod tests {
     #[test]
     fn the_token_never_reaches_the_command_line() {
         let dir = std::env::temp_dir();
-        let auth = Auth { token: "ghp_SECRET".into(), host: "github.com".into() };
+        let _guard = crate::tests::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // (where the runtime directory is not writable, the private data folder is used)
+        std::env::set_var("GRASSFIELD_DATA", std::env::temp_dir().join(format!("gf-askpass-{}", std::process::id())).join("library.json"));
+        let file = TokenFile::create("ghp_SECRET").unwrap();
+        let path = file.path.clone();
+        assert_eq!(token_from_file(&path), "ghp_SECRET");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(std::fs::metadata(path.parent().unwrap()).unwrap().permissions().mode() & 0o777, 0o700);
+        }
+        let auth = Auth { token: "ghp_SECRET".into(), host: "github.com".into(), file: Some(file) };
         let cmd = git_command(&dir, &["fetch", "-q", "--", "https://github.com/a/b.git", "main"], &auth);
+        let envs: Vec<_> = cmd.get_envs().map(|(k, v)| (k.to_string_lossy().to_string(), v.map(|v| v.to_string_lossy().to_string()))).collect();
+        // the token is in neither the arguments nor the environment of git
         for a in cmd.get_args() {
             assert!(!a.to_string_lossy().contains("ghp_SECRET"), "token in argv: {a:?}");
         }
-        let envs: Vec<_> = cmd.get_envs().map(|(k, v)| (k.to_string_lossy().to_string(), v.map(|v| v.to_string_lossy().to_string()))).collect();
+        for (k, v) in &envs {
+            assert!(!v.as_deref().unwrap_or("").contains("ghp_SECRET"), "token in the environment: {k}");
+        }
         assert!(envs.iter().any(|(k, v)| k == "GIT_ASKPASS" && v.is_some()));
-        assert!(envs.iter().any(|(k, v)| k == TOKEN_ENV && v.as_deref() == Some("ghp_SECRET")));
+        assert!(envs.iter().any(|(k, v)| k == TOKEN_FILE_ENV && v.as_deref() == Some(path.to_str().unwrap())));
+        assert!(envs.iter().any(|(k, v)| k == OLD_TOKEN_ENV && v.is_none()), "an inherited token variable is cleared");
         // no credential helper may keep a copy of the token
         assert!(cmd.get_args().any(|a| a == "credential.helper="));
+        // local steps never get a way to the token
+        for step in ["init", "config", "checkout", "reset", "add", "status", "commit"] {
+            let local = git_command(&dir, &[step], &auth);
+            assert!(!local.get_envs().any(|(k, v)| k == "GIT_ASKPASS" || (k == TOKEN_FILE_ENV && v.is_some())), "{step}");
+        }
+        // the file is gone when the sync ends
+        drop(auth);
+        assert!(!path.exists());
+        std::env::remove_var("GRASSFIELD_DATA");
         // without a token, the user's own git setup is left alone
-        let plain = git_command(&dir, &["status"], &Auth { token: String::new(), host: String::new() });
+        let plain = git_command(&dir, &["fetch"], &Auth { token: String::new(), host: String::new(), file: None });
         assert!(!plain.get_envs().any(|(k, _)| k == "GIT_ASKPASS"));
         assert!(!plain.get_args().any(|a| a == "credential.helper="));
     }
 
     #[test]
     fn unknown_ssh_hosts_are_refused_and_explained() {
-        let cmd = git_command(&std::env::temp_dir(), &["status"], &Auth { token: String::new(), host: String::new() });
+        let cmd = git_command(&std::env::temp_dir(), &["status"], &Auth { token: String::new(), host: String::new(), file: None });
         let ssh = cmd.get_envs().find(|(k, _)| *k == "GIT_SSH_COMMAND").and_then(|(_, v)| v).unwrap();
         assert!(ssh.to_string_lossy().contains("StrictHostKeyChecking=yes"));
         assert!(!ssh.to_string_lossy().contains("accept-new"));

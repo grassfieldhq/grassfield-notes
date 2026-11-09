@@ -255,7 +255,7 @@ fn exports_include_pictures() {
 }
 
 /// Tests that point GRASSFIELD_DATA somewhere take turns.
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 
 #[test]
