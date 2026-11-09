@@ -50,6 +50,14 @@ enum OpenRequest {
     File(PathBuf),
 }
 
+/// An export waiting for the user to choose where it goes (system Save panel).
+enum ExportTarget {
+    /// notes of the library
+    Notes(Vec<u64>),
+    /// a Markdown file opened on its own (by its id in `files`)
+    File(u64),
+}
+
 /// A keyring call running in the background.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SecretOp {
@@ -135,6 +143,10 @@ pub struct GrassApp {
     file_seq: u64,
     /// another window owns the library: this one doesn't save notes
     other_instance: bool,
+    /// "Save as…" for a file in conflict: the system's Save panel is open
+    save_as_panel: Option<(files::ConflictPrompt, std::sync::mpsc::Receiver<crate::portal::Answer>)>,
+    /// an export whose destination is being chosen in the system's Save panel
+    export_panel: Option<(ExportTarget, Format, std::sync::mpsc::Receiver<crate::portal::Answer>)>,
     /// a link or file waiting for the user's go-ahead
     pending_open: Option<OpenRequest>,
     /// a file in conflict waits for the user's choice
@@ -224,6 +236,8 @@ impl GrassApp {
             file_seq: 0,
             other_instance,
             pending_open: None,
+            export_panel: None,
+            save_as_panel: None,
             conflict_prompt: None,
             quit_confirmed: false,
             last_inbox_check: 0.0,
@@ -273,7 +287,7 @@ impl GrassApp {
                             app.settings_page = SettingsPage::Export;
                         }
                         "edit" => app.file_reading = false,
-                        "picker" => app.picker.start(Purpose::Scan),
+                        "picker" => app.picker.start_builtin(Purpose::Scan),
                         "sketch" => {
                             if let Some(id) = app.selected {
                                 app.open_sketch(id, None);
@@ -512,7 +526,7 @@ impl GrassApp {
                     self.notify(ctx, crate::i18n::trf("Tag #{t} retiré des notes", &[("t", &t as &dyn std::fmt::Display)]));
                     self.mark_dirty(ctx);
                 }
-                Action::PickFiles(purpose) => self.picker.start(purpose),
+                Action::PickFiles(purpose) => self.picker.start(ctx, purpose),
                 Action::RemoveAttachment(id, name) => {
                     if let Some(n) = self.lib.get_mut(id) {
                         n.attachments.retain(|a| a.name != name);
@@ -590,8 +604,62 @@ impl GrassApp {
             .join("Grassfield Notes")
     }
 
+    /// Export notes: the system's Save panel picks the file (or the folder, for several
+    /// notes) when there is one; otherwise they go to the default export folder.
     fn export(&mut self, ctx: &egui::Context, ids: &[u64], format: Format) {
-        let dir = Self::export_dir();
+        if self.screenshot.is_none() && crate::portal::available() && self.export_panel.is_none() {
+            let title = crate::i18n::tr("Exporter").to_string();
+            let ask = match ids {
+                [one] => match self.lib.get(*one) {
+                    Some(n) => crate::portal::Ask::Save { name: export::file_name(n, format) },
+                    None => return,
+                },
+                _ => crate::portal::Ask::Folder,
+            };
+            let rx = crate::portal::ask(ctx, title, ask, Some(Self::export_dir()));
+            self.export_panel = Some((ExportTarget::Notes(ids.to_vec()), format, rx));
+            return;
+        }
+        self.export_to_folder(ctx, ids, format, Self::export_dir());
+    }
+
+    /// The answer of the Save panel opened by an export.
+    fn poll_export_panel(&mut self, ctx: &egui::Context) {
+        let Some((_, _, rx)) = &self.export_panel else { return };
+        let answer = match rx.try_recv() {
+            Ok(a) => a,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => crate::portal::Answer::Unavailable,
+        };
+        let Some((target, format, _)) = self.export_panel.take() else { return };
+        match (target, answer) {
+            (_, crate::portal::Answer::Cancelled) => {}
+            (ExportTarget::Notes(ids), crate::portal::Answer::Files(paths)) => {
+                let Some(path) = paths.into_iter().next() else { return };
+                if ids.len() == 1 {
+                    let res = self.lib.get(ids[0]).map(|n| export::export_note_at(n, format, &path, &Library::attachment_dir(n.id)));
+                    match res {
+                        Some(Ok(p)) => self.notify(ctx, crate::i18n::trf("Exporté : {0}", &[("0", &p.display() as &dyn std::fmt::Display)])),
+                        Some(Err(e)) => self.notify(ctx, crate::i18n::trf("Export impossible : {e}", &[("e", &e as &dyn std::fmt::Display)])),
+                        None => {}
+                    }
+                } else {
+                    self.export_to_folder(ctx, &ids, format, path);
+                }
+            }
+            (ExportTarget::Notes(ids), crate::portal::Answer::Unavailable) => self.export_to_folder(ctx, &ids, format, Self::export_dir()),
+            (ExportTarget::File(uid), answer) => {
+                let Some(i) = self.files.iter().position(|f| f.uid() == uid) else { return };
+                let at = match answer {
+                    crate::portal::Answer::Files(p) => p.into_iter().next(),
+                    _ => None,
+                };
+                self.write_file_export(ctx, i, format, at);
+            }
+        }
+    }
+
+    fn export_to_folder(&mut self, ctx: &egui::Context, ids: &[u64], format: Format, dir: PathBuf) {
         let mut count = 0;
         let mut last_err = None;
         for id in ids {
@@ -771,6 +839,8 @@ impl GrassApp {
 
     fn poll_background(&mut self, ctx: &egui::Context) {
         self.poll_secret(ctx);
+        self.poll_export_panel(ctx);
+        self.poll_save_as(ctx);
         if let Some(job) = &self.sync_job {
             if let Some(out) = job.poll() {
                 self.sync_job = None;

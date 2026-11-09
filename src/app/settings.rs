@@ -6,7 +6,7 @@ impl GrassApp {
     pub(super) fn settings_screen(&mut self, ui: &mut egui::Ui) {
         let t = self.theme();
         let ctx = ui.ctx().clone();
-        if ctx.input(|i| i.key_pressed(Key::Escape)) && !self.picker.open {
+        if ctx.input(|i| i.key_pressed(Key::Escape)) && !self.picker.busy() {
             self.show_settings = false;
         }
         // top bar

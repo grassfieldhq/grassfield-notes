@@ -182,12 +182,28 @@ pub fn export_note(note: &Note, format: Format, dir: &Path) -> std::io::Result<P
     export_note_with(note, format, dir, &Library::attachment_dir(note.id))
 }
 
+/// The file name an export gets by default ("Title.pdf").
+pub fn file_name(note: &Note, format: Format) -> String {
+    format!("{}.{}", safe_name(&note.title(), note.id), format.ext())
+}
+
 /// Same, with pictures looked up in `pics` (a Markdown file's own folder, for example).
 pub fn export_note_with(note: &Note, format: Format, dir: &Path, pics: &Path) -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
-    let title = note.title();
-    let base = safe_name(&title, note.id);
+    let base = safe_name(&note.title(), note.id);
     let path = unique_path(dir, &base, format.ext());
+    export_note_at(note, format, &path, pics)
+}
+
+/// Write one note at exactly `path` (chosen by the user in a Save panel).
+pub fn export_note_at(note: &Note, format: Format, path: &Path, pics: &Path) -> std::io::Result<PathBuf> {
+    let mut path = path.to_path_buf();
+    if path.extension().map(|e| e.to_string_lossy().to_lowercase()) != Some(format.ext().to_string()) {
+        let mut s = path.into_os_string();
+        s.push(format!(".{}", format.ext()));
+        path = PathBuf::from(s);
+    }
+    let title = note.title();
     match format {
         Format::Txt => {
             let txt: Vec<String> = note.text.lines().map(strip_markdown_line).collect();

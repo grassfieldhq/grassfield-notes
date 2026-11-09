@@ -123,6 +123,10 @@ impl OpenFile {
         })
     }
 
+    pub fn uid(&self) -> u64 {
+        self.uid
+    }
+
     pub fn name(&self) -> String {
         self.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
     }
@@ -133,6 +137,11 @@ impl OpenFile {
 
     pub fn dirty(&self) -> bool {
         self.text != self.saved
+    }
+
+    /// The file as a note, for exports.
+    pub fn as_note(&self) -> model::Note {
+        model::Note { id: self.uid, text: self.text.clone(), created: now(), modified: now(), pinned: false, archived: false, trashed: false, attachments: vec![] }
     }
 
     fn disk_text(&self) -> String {
@@ -278,6 +287,21 @@ impl GrassApp {
         self.active_file = if self.files.is_empty() { None } else { Some(i.min(self.files.len() - 1)) };
     }
 
+    /// Export an open file, at `at` (chosen in a Save panel) or in the default export folder.
+    pub(super) fn write_file_export(&mut self, ctx: &egui::Context, i: usize, fmt: Format, at: Option<PathBuf>) {
+        let f = &self.files[i];
+        let note = f.as_note();
+        let res = match at {
+            Some(p) => export::export_note_at(&note, fmt, &p, &f.dir()),
+            None => export::export_note_with(&note, fmt, &Self::export_dir(), &f.dir()),
+        };
+        let msg = match res {
+            Ok(p) => trf("Exporté : {0}", &[("0", &p.display())]),
+            Err(e) => trf("Export impossible : {e}", &[("e", &e)]),
+        };
+        self.notify(ctx, msg);
+    }
+
     /// Before the window closes: files in conflict are settled one by one with the user.
     pub(super) fn check_quit(&mut self, ctx: &egui::Context) {
         if !ctx.input(|i| i.viewport().close_requested()) || self.quit_confirmed {
@@ -343,6 +367,12 @@ impl GrassApp {
                 self.files[i].reload();
                 true
             }
+            Choice::SaveAs if self.screenshot.is_none() && crate::portal::available() => {
+                let f = &self.files[i];
+                let rx = crate::portal::ask(ctx, tr("Enregistrer sous…").to_string(), crate::portal::Ask::Save { name: f.name() }, Some(f.dir()));
+                self.save_as_panel = Some((prompt, rx));
+                false
+            }
             Choice::SaveAs => match self.files[i].save_copy() {
                 Ok(p) => {
                     self.notify(ctx, trf("Votre version est enregistrée dans {0}", &[("0", &p.display())]));
@@ -356,10 +386,48 @@ impl GrassApp {
             },
             Choice::Cancel => false,
         };
-        if !settled {
-            return;
+        if settled {
+            self.after_conflict(ctx, i, prompt.then);
         }
-        match prompt.then {
+    }
+
+    /// The answer of the Save panel opened by "Save as…" in a conflict.
+    pub(super) fn poll_save_as(&mut self, ctx: &egui::Context) {
+        let Some((_, rx)) = &self.save_as_panel else { return };
+        let answer = match rx.try_recv() {
+            Ok(a) => a,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => crate::portal::Answer::Unavailable,
+        };
+        let Some((prompt, _)) = self.save_as_panel.take() else { return };
+        let Some(i) = self.files.iter().position(|f| f.uid == prompt.uid) else { return };
+        let saved = match answer {
+            crate::portal::Answer::Files(p) if !p.is_empty() => {
+                let text = self.files[i].disk_text();
+                crate::safefs::write_atomic(&p[0], text.as_bytes(), 0o644).map(|_| p[0].clone()).map_err(|e| e.to_string())
+            }
+            crate::portal::Answer::Unavailable => self.files[i].save_copy(),
+            // cancelled: the question comes back
+            _ => {
+                self.conflict_prompt = Some(prompt);
+                return;
+            }
+        };
+        match saved {
+            Ok(p) => {
+                self.notify(ctx, trf("Votre version est enregistrée dans {0}", &[("0", &p.display())]));
+                self.files[i].reload();
+                self.after_conflict(ctx, i, prompt.then);
+            }
+            Err(e) => {
+                self.notify(ctx, trf("Fichier non enregistré : {e}", &[("e", &e)]));
+                self.conflict_prompt = Some(prompt);
+            }
+        }
+    }
+
+    fn after_conflict(&mut self, ctx: &egui::Context, i: usize, then: AfterConflict) {
+        match then {
             AfterConflict::Stay => {}
             AfterConflict::Close => self.close_file(ctx, i),
             AfterConflict::Quit => {
@@ -664,13 +732,13 @@ impl GrassApp {
             self.add_file_to_library(&ctx, i);
         }
         if let Some(fmt) = export_fmt {
-            let f = &self.files[i];
-            let note = model::Note { id: f.uid, text: f.text.clone(), created: now(), modified: now(), pinned: false, archived: false, trashed: false, attachments: vec![] };
-            let msg = match export::export_note_with(&note, fmt, &Self::export_dir(), &f.dir()) {
-                Ok(p) => trf("Exporté : {0}", &[("0", &p.display())]),
-                Err(e) => trf("Export impossible : {e}", &[("e", &e)]),
-            };
-            self.notify(&ctx, msg);
+            if self.screenshot.is_none() && crate::portal::available() && self.export_panel.is_none() {
+                let name = export::file_name(&self.files[i].as_note(), fmt);
+                let rx = crate::portal::ask(&ctx, tr("Exporter").to_string(), crate::portal::Ask::Save { name }, Some(Self::export_dir()));
+                self.export_panel = Some((ExportTarget::File(self.files[i].uid), fmt, rx));
+            } else {
+                self.write_file_export(&ctx, i, fmt, None);
+            }
         }
 
         // banners

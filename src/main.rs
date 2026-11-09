@@ -10,6 +10,7 @@ mod fonts;
 mod i18n;
 mod icons;
 mod platform;
+mod portal;
 mod safefs;
 mod secrets;
 mod sketch;

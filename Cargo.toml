@@ -35,6 +35,9 @@ libc = "0.2"
 # the system keyring that holds the GitHub token
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus-secret-service-keyring-store = { version = "1", features = ["crypto-rust"] }
+# the system's Open and Save panels (XDG desktop portal), on the same D-Bus stack
+ashpd = { version = "0.13", default-features = false, features = ["async-io", "file_chooser"] }
+async-io = "2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 apple-native-keyring-store = { version = "1", features = ["keychain"] }
