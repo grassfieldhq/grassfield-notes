@@ -159,6 +159,22 @@ pub fn write_atomic_with(
     done
 }
 
+/// Write a new file; fails if anything (a file or a link) already has that name.
+pub fn write_new(path: &Path, bytes: &[u8], mode: u32) -> std::io::Result<()> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(mode).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    #[cfg(not(unix))]
+    let _ = mode;
+    let mut f = opts.open(path)?;
+    std::io::Write::write_all(&mut f, bytes)?;
+    f.sync_all()
+}
+
 /// `write_atomic_with` for bytes already in memory.
 pub fn write_atomic(dst: &Path, bytes: &[u8], mode: u32) -> std::io::Result<()> {
     write_atomic_with(dst, mode, |f| std::io::Write::write_all(f, bytes))

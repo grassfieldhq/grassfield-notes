@@ -28,6 +28,54 @@ fn mtime(p: &Path) -> Option<SystemTime> {
     std::fs::metadata(p).and_then(|m| m.modified()).ok()
 }
 
+/// What to do once a save conflict is settled.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum AfterConflict {
+    Stay,
+    Close,
+    Quit,
+}
+
+/// A file changed on disk while it had unsaved edits here: the user chooses what to keep.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) struct ConflictPrompt {
+    pub uid: u64,
+    pub then: AfterConflict,
+}
+
+#[cfg(unix)]
+fn mode_of(m: &std::fs::Metadata) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    m.permissions().mode() & 0o777
+}
+
+#[cfg(not(unix))]
+fn mode_of(_: &std::fs::Metadata) -> u32 {
+    0
+}
+
+/// Save a Markdown file.
+///
+/// Links: the path was resolved once, when the file was opened (`canonicalize` follows
+/// links there), and saving writes to that resolved file only. If a link has appeared at
+/// that path since, saving is refused: a link is never written through, nor silently
+/// replaced.
+///
+/// The text goes to a temporary file in the same folder, is flushed to disk, then renamed
+/// over the file, which keeps its permissions: a crash or a full disk never leaves a
+/// half-written file. (The renamed file is a new inode: hard links keep the old text.)
+fn write_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let mode = match std::fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_symlink() => return Err(tr("Le fichier a été remplacé par un lien : il n'a pas été enregistré.").to_string()),
+        Ok(m) if !m.is_file() => return Err(tr("Ce n'est plus un fichier ordinaire : il n'a pas été enregistré.").to_string()),
+        Ok(m) => mode_of(&m),
+        // moved or deleted meanwhile: saving puts it back
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0o644,
+        Err(e) => return Err(e.to_string()),
+    };
+    crate::safefs::write_atomic(path, bytes, mode).map_err(|e| e.to_string())
+}
+
 pub(super) fn is_markdown(p: &Path) -> bool {
     p.extension()
         .and_then(|e| e.to_str())
@@ -87,12 +135,45 @@ impl OpenFile {
         self.text != self.saved
     }
 
+    fn disk_text(&self) -> String {
+        if self.crlf { self.text.replace('\n', "\r\n") } else { self.text.clone() }
+    }
+
+    /// The file changed on disk since it was read or saved here.
+    pub fn changed_on_disk(&self) -> bool {
+        mtime(&self.path) != self.disk_mtime
+    }
+
+    /// Unsaved edits that would overwrite changes made by another program.
+    pub fn in_conflict(&mut self) -> bool {
+        if self.dirty() && !self.read_only && (self.conflict || self.changed_on_disk()) {
+            self.conflict = true;
+        }
+        self.conflict && self.dirty()
+    }
+
+    /// Keep this window's text in a new file next to the original ("name (my version).md").
+    pub fn save_copy(&self) -> Result<PathBuf, String> {
+        let stem = self.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        let ext = self.path.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
+        let mine = tr("ma version");
+        let mut last = String::new();
+        for k in 1..100 {
+            let name = if k == 1 { format!("{stem} ({mine}){ext}") } else { format!("{stem} ({mine} {k}){ext}") };
+            match crate::safefs::write_new(&self.dir().join(&name), self.disk_text().as_bytes(), 0o644) {
+                Ok(()) => return Ok(self.dir().join(name)),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => last = e.to_string(),
+            }
+        }
+        Err(last)
+    }
+
     pub fn save(&mut self) -> Result<(), String> {
         if self.read_only {
             return Err(tr("Ce fichier est en lecture seule.").to_string());
         }
-        let out = if self.crlf { self.text.replace('\n', "\r\n") } else { self.text.clone() };
-        std::fs::write(&self.path, out).map_err(|e| e.to_string())?;
+        write_file(&self.path, self.disk_text().as_bytes())?;
         self.saved = self.text.clone();
         self.disk_mtime = mtime(&self.path);
         self.conflict = false;
@@ -186,6 +267,12 @@ impl GrassApp {
         if i >= self.files.len() {
             return;
         }
+        // never save silently over a file another program changed: ask first
+        if self.files[i].in_conflict() {
+            self.active_file = Some(i);
+            self.conflict_prompt = Some(ConflictPrompt { uid: self.files[i].uid, then: AfterConflict::Close });
+            return;
+        }
         if self.files[i].dirty() {
             if let Err(e) = self.files[i].save() {
                 self.notify(ctx, trf("Fichier non enregistré : {e}", &[("e", &e)]));
@@ -196,6 +283,117 @@ impl GrassApp {
         self.active_file = if self.files.is_empty() { None } else { Some(i.min(self.files.len() - 1)) };
     }
 
+    /// Before the window closes: files in conflict are settled one by one with the user.
+    pub(super) fn check_quit(&mut self, ctx: &egui::Context) {
+        if !ctx.input(|i| i.viewport().close_requested()) || self.quit_confirmed {
+            return;
+        }
+        if let Some(i) = self.files.iter_mut().position(|f| f.in_conflict()) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.show_settings = false;
+            self.active_file = Some(i);
+            self.conflict_prompt = Some(ConflictPrompt { uid: self.files[i].uid, then: AfterConflict::Quit });
+        }
+    }
+
+    /// The "Keep mine / Keep theirs / Save as" question for a file in conflict.
+    pub(super) fn conflict_window(&mut self, ctx: &egui::Context) {
+        let Some(prompt) = self.conflict_prompt else { return };
+        let Some(i) = self.files.iter().position(|f| f.uid == prompt.uid) else {
+            self.conflict_prompt = None;
+            return;
+        };
+        let t = self.theme();
+        let name = self.files[i].name();
+        #[derive(PartialEq)]
+        enum Choice {
+            Mine,
+            Theirs,
+            SaveAs,
+            Cancel,
+        }
+        let mut choice = None;
+        egui::Modal::new(Id::unique("file-conflict")).show(ctx, |ui| {
+            ui.set_max_width(480.0);
+            ui.label(egui::RichText::new(trf("« {name} » a été modifié par un autre programme pendant que vous le modifiiez ici.", &[("name", &name)])).font(FontId::new(16.0, FontFamily::Name("bold".into()))).color(t.text));
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new(tr("Quelle version garder ? « Enregistrer sous… » garde les deux : votre version va dans un nouveau fichier.")).color(t.muted));
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if ui.button(tr("Garder ma version")).clicked() {
+                    choice = Some(Choice::Mine);
+                }
+                if ui.button(tr("Garder la leur")).clicked() {
+                    choice = Some(Choice::Theirs);
+                }
+                if ui.button(tr("Enregistrer sous…")).clicked() {
+                    choice = Some(Choice::SaveAs);
+                }
+                if ui.button(tr("Annuler")).clicked() {
+                    choice = Some(Choice::Cancel);
+                }
+            });
+        });
+        let Some(choice) = choice else { return };
+        self.conflict_prompt = None;
+        let settled = match choice {
+            Choice::Mine => match self.files[i].save() {
+                Ok(()) => true,
+                Err(e) => {
+                    self.notify(ctx, trf("Fichier non enregistré : {e}", &[("e", &e)]));
+                    false
+                }
+            },
+            Choice::Theirs => {
+                self.files[i].reload();
+                true
+            }
+            Choice::SaveAs => match self.files[i].save_copy() {
+                Ok(p) => {
+                    self.notify(ctx, trf("Votre version est enregistrée dans {0}", &[("0", &p.display())]));
+                    self.files[i].reload();
+                    true
+                }
+                Err(e) => {
+                    self.notify(ctx, trf("Fichier non enregistré : {e}", &[("e", &e)]));
+                    false
+                }
+            },
+            Choice::Cancel => false,
+        };
+        if !settled {
+            return;
+        }
+        match prompt.then {
+            AfterConflict::Stay => {}
+            AfterConflict::Close => self.close_file(ctx, i),
+            AfterConflict::Quit => {
+                if let Some(next) = self.files.iter_mut().position(|f| f.in_conflict()) {
+                    self.active_file = Some(next);
+                    self.conflict_prompt = Some(ConflictPrompt { uid: self.files[next].uid, then: AfterConflict::Quit });
+                } else {
+                    self.quit_confirmed = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+        }
+    }
+
+    /// Last chance when the app ends without a chance to ask (logout, a signal):
+    /// edits in conflict are kept in a copy next to the file, never written over it.
+    pub(super) fn save_files_on_exit(&mut self) {
+        for f in &mut self.files {
+            if !f.dirty() || f.read_only {
+                continue;
+            }
+            if f.in_conflict() {
+                let _ = f.save_copy();
+            } else {
+                let _ = f.save();
+            }
+        }
+    }
+
     /// Save edited files a moment after typing stops, and follow outside changes.
     pub(super) fn tick_files(&mut self, ctx: &egui::Context) {
         let now_t = ctx.input(|i| i.time);
@@ -203,6 +401,10 @@ impl GrassApp {
         for f in &mut self.files {
             f.check_disk(now_t);
             if f.dirty() && !f.conflict && !f.read_only && now_t - f.last_edit > 1.0 {
+                // changed on disk since the last check: never write over it unasked
+                if f.in_conflict() {
+                    continue;
+                }
                 if let Err(e) = f.save() {
                     f.error = Some(e.clone());
                     errors.push(e);
@@ -356,7 +558,9 @@ impl GrassApp {
                 inp.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::W)),
             )
         });
-        if save_now {
+        if save_now && self.files[i].in_conflict() {
+            self.conflict_prompt = Some(ConflictPrompt { uid: self.files[i].uid, then: AfterConflict::Stay });
+        } else if save_now {
             match self.files[i].save() {
                 Ok(()) => self.notify(&ctx, tr("Fichier enregistré")),
                 Err(e) => self.notify(&ctx, trf("Fichier non enregistré : {e}", &[("e", &e)])),
@@ -721,6 +925,56 @@ mod tests {
         assert_eq!(link_target(text, 8).as_deref(), Some("Autre%20page.md"));
         assert_eq!(link_target("lien https://example.org fin", 10).as_deref(), Some("https://example.org"));
         assert_eq!(link_target("voir [[Notes]]", 9).as_deref(), Some("Notes.md"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saving_is_atomic_keeps_the_mode_and_never_follows_links() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("gf-save-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("note.md");
+        std::fs::write(&p, "v1").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let mut f = OpenFile::open(&p, 1).unwrap();
+        f.text = "v2".into();
+        f.save().unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "v2");
+        assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o640, "mode kept");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "no temporary file left");
+        // a link appears where the file was: refused, the link's target untouched
+        let target = dir.join("target.md");
+        std::fs::write(&target, "cible").unwrap();
+        std::fs::remove_file(&p).unwrap();
+        std::os::unix::fs::symlink(&target, &p).unwrap();
+        f.text = "v3".into();
+        assert!(f.save().is_err());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "cible");
+        assert!(std::fs::symlink_metadata(&p).unwrap().file_type().is_symlink());
+    }
+
+    #[test]
+    fn a_conflict_is_never_saved_silently() {
+        let dir = std::env::temp_dir().join(format!("gf-conflict-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("note.md");
+        std::fs::write(&p, "v1").unwrap();
+        let mut f = OpenFile::open(&p, 1).unwrap();
+        f.text = "mine".into();
+        // another program writes the file (with a clearly different modification time)
+        std::fs::write(&p, "theirs").unwrap();
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+        std::fs::File::options().write(true).open(&p).unwrap().set_modified(later).unwrap();
+        assert!(f.in_conflict());
+        let copy = f.save_copy().unwrap();
+        assert_eq!(copy.file_name().unwrap().to_string_lossy(), "note (ma version).md");
+        assert_eq!(std::fs::read_to_string(&copy).unwrap(), "mine");
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "theirs", "the other program's change is kept");
+        // a second copy never overwrites the first
+        let copy2 = f.save_copy().unwrap();
+        assert_ne!(copy, copy2);
     }
 
     #[test]

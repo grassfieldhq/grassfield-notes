@@ -126,6 +126,10 @@ pub struct GrassApp {
     file_seq: u64,
     /// another window owns the library: this one doesn't save notes
     other_instance: bool,
+    /// a file in conflict waits for the user's choice
+    conflict_prompt: Option<files::ConflictPrompt>,
+    /// every conflict is settled: the window may close
+    quit_confirmed: bool,
     last_inbox_check: f64,
     last_lock_beat: f64,
     started: std::time::Instant,
@@ -208,6 +212,8 @@ impl GrassApp {
             file_thumbs: Default::default(),
             file_seq: 0,
             other_instance,
+            conflict_prompt: None,
+            quit_confirmed: false,
             last_inbox_check: 0.0,
             last_lock_beat: 0.0,
             started: std::time::Instant::now(),
@@ -968,6 +974,8 @@ impl eframe::App for GrassApp {
         }
         self.rename_window(&ctx);
         self.confirm_window(&ctx);
+        self.check_quit(&ctx);
+        self.conflict_window(&ctx);
         self.toast(&ctx);
         self.run_actions(&ctx);
 
@@ -987,11 +995,7 @@ impl eframe::App for GrassApp {
         if self.dirty {
             self.save_now();
         }
-        for f in &mut self.files {
-            if f.dirty() {
-                let _ = f.save();
-            }
-        }
+        self.save_files_on_exit();
         if self.persist {
             instance_lock::release();
         }
