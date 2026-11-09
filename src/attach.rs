@@ -3,7 +3,7 @@
 
 use crate::model::{Attachment, Library};
 use eframe::egui;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
 
@@ -198,17 +198,101 @@ fn ocr_lang() -> String {
     }
 }
 
-/// Read the text of an image (OCR) or a PDF. Empty when nothing could be read.
-pub fn read_text(path: &Path) -> String {
-    let lower = path.to_string_lossy().to_lowercase();
-    let out = if lower.ends_with(".pdf") {
-        crate::platform::command("pdftotext").arg("-layout").arg(path).arg("-").output()
-    } else {
-        crate::platform::command("tesseract").arg(path).arg("stdout").arg("-l").arg(ocr_lang()).output()
+/// Text readers run at most this long per document.
+const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+/// Memory a text reader may use (address space).
+const READ_MEMORY: u64 = 1536 * 1024 * 1024;
+/// Most text kept from one document.
+const MAX_TEXT_BYTES: u64 = 4 * 1024 * 1024;
+/// Text readers running at the same time.
+const MAX_READERS: usize = 2;
+
+/// Limits for a text reader, applied in the child just before it starts.
+#[cfg(unix)]
+fn limit_child(cmd: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt;
+    let cpu = READ_TIMEOUT.as_secs();
+    // SAFETY: only setrlimit runs between fork and exec; it is async-signal-safe and
+    // touches no memory shared with the parent.
+    unsafe {
+        cmd.pre_exec(move || {
+            let set = |res, value: u64| {
+                let lim = libc::rlimit { rlim_cur: value as libc::rlim_t, rlim_max: value as libc::rlim_t };
+                if libc::setrlimit(res, &lim) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            };
+            set(libc::RLIMIT_AS, READ_MEMORY)?;
+            set(libc::RLIMIT_CPU, cpu)?;
+            // the readers only write to a pipe: no file of any size
+            set(libc::RLIMIT_FSIZE, 0)?;
+            set(libc::RLIMIT_CORE, 0)?;
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(unix))]
+fn limit_child(_: &mut std::process::Command) {}
+
+/// Run a text reader with limits: memory, CPU time, a wall-clock timeout (the reader is
+/// killed past it) and a cap on the text kept.
+fn run_reader(cmd: std::process::Command) -> Option<String> {
+    run_reader_for(cmd, READ_TIMEOUT)
+}
+
+fn run_reader_for(mut cmd: std::process::Command, timeout: std::time::Duration) -> Option<String> {
+    use std::io::Read;
+    use std::process::Stdio;
+    // tesseract would start one thread per core for each document
+    cmd.env("OMP_THREAD_LIMIT", "1").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    limit_child(&mut cmd);
+    let mut child = cmd.spawn().ok()?;
+    let stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut out = Vec::new();
+        let _ = stdout.take(MAX_TEXT_BYTES).read_to_end(&mut out);
+        out
+    });
+    let start = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break Some(s),
+            Ok(None) if start.elapsed() < timeout => std::thread::sleep(std::time::Duration::from_millis(50)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+        }
     };
-    match out {
-        Ok(o) if o.status.success() => {
-            let t = String::from_utf8_lossy(&o.stdout);
+    // after a timeout the reading thread is left to end on its own (a stray grandchild
+    // could keep the pipe open)
+    status.filter(|s| s.success())?;
+    let out = reader.join().ok()?;
+    Some(String::from_utf8_lossy(&out).to_string())
+}
+
+/// Read the text of an image (OCR) or a PDF. Empty when nothing could be read.
+/// Only regular files whose content is a picture or a PDF are handed to the readers.
+pub fn read_text(path: &Path) -> String {
+    let Some(kind) = kind_of(path, crate::safefs::Links::Refuse) else { return String::new() };
+    if std::fs::metadata(path).map(|m| m.len() > MAX_PICTURE_BYTES).unwrap_or(true) {
+        return String::new();
+    }
+    // (attachment paths are absolute, so they are never read as options)
+    let cmd = if kind == Kind::Pdf {
+        let mut c = crate::platform::command("pdftotext");
+        c.arg("-layout").arg(path).arg("-");
+        c
+    } else {
+        let mut c = crate::platform::command("tesseract");
+        c.arg(path).arg("stdout").arg("-l").arg(ocr_lang());
+        c
+    };
+    match run_reader(cmd) {
+        Some(t) => {
             // tidy: collapse runs of blank lines
             let mut lines: Vec<&str> = Vec::new();
             for l in t.lines() {
@@ -220,21 +304,25 @@ pub fn read_text(path: &Path) -> String {
             }
             lines.join("\n").trim().to_string()
         }
-        _ => String::new(),
+        None => String::new(),
     }
 }
 
-/// Background text reading for attachments.
+/// Background text reading for attachments: a queue, read by at most `MAX_READERS`
+/// documents at a time (attachments may arrive by the dozen from a sync).
 pub struct Reader {
     tx: Sender<(u64, String, String)>,
     rx: Receiver<(u64, String, String)>,
+    /// queued or being read
     pending: HashSet<(u64, String)>,
+    queue: VecDeque<(u64, String, PathBuf)>,
+    running: usize,
 }
 
 impl Default for Reader {
     fn default() -> Self {
         let (tx, rx) = channel();
-        Self { tx, rx, pending: HashSet::new() }
+        Self { tx, rx, pending: HashSet::new(), queue: VecDeque::new(), running: 0 }
     }
 }
 
@@ -247,23 +335,26 @@ impl Reader {
         !self.pending.is_empty()
     }
 
-    /// Start reading every attachment that hasn't been read yet.
+    /// Queue every attachment that hasn't been read yet, and start readers when free.
     pub fn queue_unread(&mut self, lib: &Library, ctx: &egui::Context) {
         for n in &lib.notes {
             for a in &n.attachments {
                 if !a.read && !self.pending.contains(&(n.id, a.name.clone())) {
                     self.pending.insert((n.id, a.name.clone()));
-                    let tx = self.tx.clone();
-                    let path = path_of(n.id, a);
-                    let (id, name) = (n.id, a.name.clone());
-                    let ctx = ctx.clone();
-                    std::thread::spawn(move || {
-                        let text = read_text(&path);
-                        let _ = tx.send((id, name, text));
-                        ctx.request_repaint();
-                    });
+                    self.queue.push_back((n.id, a.name.clone(), path_of(n.id, a)));
                 }
             }
+        }
+        while self.running < MAX_READERS {
+            let Some((id, name, path)) = self.queue.pop_front() else { break };
+            self.running += 1;
+            let tx = self.tx.clone();
+            let ctx = ctx.clone();
+            std::thread::spawn(move || {
+                let text = read_text(&path);
+                let _ = tx.send((id, name, text));
+                ctx.request_repaint();
+            });
         }
     }
 
@@ -271,6 +362,7 @@ impl Reader {
     pub fn poll(&mut self, lib: &mut Library) -> bool {
         let mut changed = false;
         while let Ok((id, name, text)) = self.rx.try_recv() {
+            self.running = self.running.saturating_sub(1);
             self.pending.remove(&(id, name.clone()));
             if let Some(n) = lib.get_mut(id) {
                 if let Some(a) = n.attachments.iter_mut().find(|a| a.name == name) {
@@ -312,5 +404,65 @@ impl Thumbs {
         });
         self.map.insert(key, tex.clone());
         tex
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn readers_only_read_pictures_and_pdfs() {
+        let dir = std::env::temp_dir().join(format!("gf-reader-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // a PDF by name only: never handed to pdftotext
+        let fake = dir.join("fake.pdf");
+        std::fs::write(&fake, "#!/bin/sh\n").unwrap();
+        assert_eq!(read_text(&fake), "");
+        assert_eq!(kind_of(&fake, crate::safefs::Links::Refuse), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_reader_is_stopped_and_limited() {
+        // a reader that never ends is killed at the timeout (shortened here)
+        let mut slow = std::process::Command::new("sh");
+        slow.arg("-c").arg("sleep 60");
+        let t = std::time::Instant::now();
+        assert_eq!(run_reader_for(slow, std::time::Duration::from_millis(500)), None);
+        assert!(t.elapsed() < std::time::Duration::from_secs(10));
+        // and it runs with CPU, memory and file-size limits
+        let mut cmd = std::process::Command::new("sh");
+        cmd.arg("-c").arg("ulimit -t; ulimit -v; ulimit -f");
+        let out = run_reader(cmd).unwrap();
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], READ_TIMEOUT.as_secs().to_string(), "CPU limit");
+        assert_eq!(lines[1], (READ_MEMORY / 1024).to_string(), "memory limit");
+        assert_eq!(lines[2], "0", "no file writes");
+    }
+
+    #[test]
+    fn at_most_two_readers_run_at_once() {
+        let mut lib = Library::default();
+        let id = lib.new_note("# docs".into());
+        for k in 0..5 {
+            lib.get_mut(id).unwrap().attachments.push(Attachment { name: format!("missing-{k}.png"), text: String::new(), read: false });
+        }
+        let ctx = egui::Context::default();
+        let mut r = Reader::default();
+        r.queue_unread(&lib, &ctx);
+        assert_eq!(r.running, MAX_READERS);
+        assert_eq!(r.queue.len(), 5 - MAX_READERS);
+        // as readers finish, the queue drains, never more than two at a time
+        let start = std::time::Instant::now();
+        while r.busy() && start.elapsed() < std::time::Duration::from_secs(20) {
+            r.poll(&mut lib);
+            r.queue_unread(&lib, &ctx);
+            assert!(r.running <= MAX_READERS);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(!r.busy());
+        assert!(lib.get(id).unwrap().attachments.iter().all(|a| a.read));
     }
 }
