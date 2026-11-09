@@ -118,10 +118,25 @@ fn git_command(dir: &Path, args: &[&str], auth: &Auth) -> std::process::Command 
     }
     // large-file servers named by the repository are never contacted
     c.env("GIT_LFS_SKIP_SMUDGE", "1");
+    // SSH: an unknown host key is refused, never accepted on first use. The user checks
+    // the server's fingerprint once in a terminal (`ssh -T git@github.com`), which adds it
+    // to ~/.ssh/known_hosts; see SECURITY.md.
     c.args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new");
+        .env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes -o StrictHostKeyChecking=yes");
     c
+}
+
+/// A clearer message for an SSH server whose key is not known yet.
+fn explain(err: &str, url: &str) -> String {
+    if err.contains("Host key verification failed") || err.contains("No ED25519 host key is known") || err.contains("host key is known") {
+        let host = url.split('@').nth(1).and_then(|h| h.split([':', '/']).next()).unwrap_or("github.com");
+        return crate::i18n::trf(
+            "La clé du serveur {host} n'est pas encore connue de cet ordinateur. Ouvrez un terminal, lancez « ssh -T git@{host} », vérifiez que l'empreinte affichée est celle publiée par le service, répondez « yes », puis synchronisez de nouveau.",
+            &[("host", &host)],
+        );
+    }
+    err.trim().to_string()
 }
 
 /// Largest note file read from the repository.
@@ -412,7 +427,7 @@ pub(crate) fn run(settings: SyncSettings, notes: Vec<Note>, synced: BTreeSet<u64
             let _ = git(&dir, &["checkout", "-q", "-B", &branch], &auth);
             false // empty repository: first push
         }
-        Err(e) => return fail(crate::i18n::trf("Connexion au dépôt impossible : {0}", &[("0", &e.trim() as &dyn std::fmt::Display)])),
+        Err(e) => return fail(crate::i18n::trf("Connexion au dépôt impossible : {0}", &[("0", &explain(&e, &url) as &dyn std::fmt::Display)])),
     };
     let remote = read_remote(&dir);
     let (upserts, deletes, final_notes) = merge(&notes, &remote, &synced, remote_exists, settings.last_sync);
@@ -436,7 +451,7 @@ pub(crate) fn run(settings: SyncSettings, notes: Vec<Note>, synced: BTreeSet<u64
     if changed || !remote_exists {
         let refspec = format!("HEAD:refs/heads/{branch}");
         if let Err(e) = git(&dir, &["push", "-q", "--", &url, &refspec], &auth) {
-            return fail(crate::i18n::trf("Envoi vers GitHub impossible : {0}", &[("0", &e.trim() as &dyn std::fmt::Display)]));
+            return fail(crate::i18n::trf("Envoi vers GitHub impossible : {0}", &[("0", &explain(&e, &url) as &dyn std::fmt::Display)]));
         }
     }
     let base_modified = notes.iter().map(|n| (n.id, n.modified)).collect();
@@ -521,6 +536,16 @@ mod tests {
         let plain = git_command(&dir, &["status"], &Auth { token: String::new(), host: String::new() });
         assert!(!plain.get_envs().any(|(k, _)| k == "GIT_ASKPASS"));
         assert!(!plain.get_args().any(|a| a == "credential.helper="));
+    }
+
+    #[test]
+    fn unknown_ssh_hosts_are_refused_and_explained() {
+        let cmd = git_command(&std::env::temp_dir(), &["status"], &Auth { token: String::new(), host: String::new() });
+        let ssh = cmd.get_envs().find(|(k, _)| *k == "GIT_SSH_COMMAND").and_then(|(_, v)| v).unwrap();
+        assert!(ssh.to_string_lossy().contains("StrictHostKeyChecking=yes"));
+        assert!(!ssh.to_string_lossy().contains("accept-new"));
+        let msg = explain("Host key verification failed.\nfatal: Could not read from remote repository.", "git@github.com:a/b.git");
+        assert!(msg.contains("ssh -T git@github.com"), "{msg}");
     }
 
     #[test]
