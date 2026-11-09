@@ -182,6 +182,63 @@ impl GrassApp {
             });
     }
 
+    /// Links and files are shown in full before anything opens them.
+    pub(super) fn open_window(&mut self, ctx: &egui::Context) {
+        let Some(req) = self.pending_open.clone() else { return };
+        let t = self.theme();
+        let (title, target, note) = match &req {
+            OpenRequest::Link(url) => (crate::i18n::tr("Ouvrir ce lien ?"), url.clone(), crate::i18n::tr("Il s'ouvrira dans votre navigateur ou votre messagerie.")),
+            OpenRequest::File(p) => {
+                let note = if p.is_dir() || files::is_markdown(p) || attach::opens_safely(p, crate::safefs::Links::Follow) {
+                    crate::i18n::tr("Ce fichier est en dehors du dossier de la note.")
+                } else {
+                    crate::i18n::tr("Ce type de fichier ne s'ouvre jamais directement : son dossier sera affiché.")
+                };
+                (crate::i18n::tr("Ouvrir ce fichier ?"), p.display().to_string(), note)
+            }
+        };
+        let mut go = None;
+        egui::Modal::new(Id::unique("confirm-open")).show(ctx, |ui| {
+            ui.set_max_width(520.0);
+            ui.label(egui::RichText::new(title).font(FontId::new(16.0, FontFamily::Name("bold".into()))).color(t.text));
+            ui.add_space(6.0);
+            // the whole target, never shortened, so a look-alike address can be spotted
+            egui::Frame::new().fill(t.code_bg).corner_radius(6.0).inner_margin(Margin::symmetric(10, 8)).show(ui, |ui| {
+                ui.add(egui::Label::new(egui::RichText::new(&target).monospace().color(t.text)).wrap());
+            });
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new(note).size(12.5).color(t.muted));
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button(crate::i18n::tr("Ouvrir")).clicked() {
+                    go = Some(true);
+                }
+                if ui.button(crate::i18n::tr("Annuler")).clicked() || ui.input(|i| i.key_pressed(Key::Escape)) {
+                    go = Some(false);
+                }
+            });
+        });
+        let Some(go) = go else { return };
+        self.pending_open = None;
+        if !go {
+            return;
+        }
+        match req {
+            OpenRequest::Link(url) => {
+                let _ = crate::platform::open(&url);
+            }
+            OpenRequest::File(p) => {
+                if files::is_markdown(&p) && p.is_file() {
+                    self.open_files(ctx, vec![p]);
+                } else if !p.is_dir() && attach::opens_safely(&p, crate::safefs::Links::Follow) {
+                    let _ = crate::platform::open_path(&p);
+                } else {
+                    let _ = crate::platform::reveal(&p);
+                }
+            }
+        }
+    }
+
     pub(super) fn toast(&mut self, ctx: &egui::Context) {
         let Some((msg, start)) = self.toast.clone() else { return };
         let now_t = ctx.input(|i| i.time);

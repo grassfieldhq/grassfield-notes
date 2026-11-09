@@ -15,15 +15,56 @@ pub(super) struct OpenFile {
     /// the file changed on disk while there were unsaved edits here
     conflict: bool,
     read_only: bool,
+    /// too large to style: shown as plain text (and read-only)
+    plain: bool,
     /// the file used Windows line endings (kept when saving)
     crlf: bool,
     error: Option<String>,
     cache: Option<(u64, egui::text::LayoutJob)>,
+    /// styling of each line, so a keystroke only restyles its line
+    lines: markdown::LineCache,
     uid: u64,
 }
 
 fn mtime(p: &Path) -> Option<SystemTime> {
     std::fs::metadata(p).and_then(|m| m.modified()).ok()
+}
+
+/// What to do once a save conflict is settled.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum AfterConflict {
+    Stay,
+    Close,
+    Quit,
+}
+
+/// A file changed on disk while it had unsaved edits here: the user chooses what to keep.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) struct ConflictPrompt {
+    pub uid: u64,
+    pub then: AfterConflict,
+}
+
+/// Save a Markdown file.
+///
+/// Links: the path was resolved once, when the file was opened (`canonicalize` follows
+/// links there), and saving writes to that resolved file only. If a link has appeared at
+/// that path since, saving is refused: a link is never written through, nor silently
+/// replaced.
+///
+/// How (see `safefs::save_document`): normally a new file with the same mode, owner,
+/// group, extended attributes and ACLs is flushed and renamed over the old one, so a crash
+/// never leaves a half-written file (hard links keep the old text). When that cannot keep
+/// the file as it was (a folder that is not writable, an owner that cannot be given to a
+/// new file), the file is written in place after a private backup of its old content.
+/// A deleted file is written anew.
+fn write_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_symlink() => return Err(tr("Le fichier a été remplacé par un lien : il n'a pas été enregistré.").to_string()),
+        Ok(m) if !m.is_file() => return Err(tr("Ce n'est plus un fichier ordinaire : il n'a pas été enregistré.").to_string()),
+        _ => {}
+    }
+    crate::safefs::save_document(path, bytes, &Library::data_dir().join("backups")).map(|_| ()).map_err(|e| e.to_string())
 }
 
 pub(super) fn is_markdown(p: &Path) -> bool {
@@ -33,15 +74,29 @@ pub(super) fn is_markdown(p: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Files larger than this open read-only and without Markdown styling: editing and
+/// styling them would freeze the window.
+pub(super) const MAX_EDIT_BYTES: usize = 1024 * 1024;
+/// Files larger than this are not opened at all.
+pub(super) const MAX_OPEN_BYTES: u64 = 32 * 1024 * 1024;
+
+/// Read a text file the user asked to open: a regular file (never a named pipe or a
+/// device, which would hang the window), of a bounded size, in UTF-8.
+fn read_text(path: &Path) -> Result<String, String> {
+    let bytes = crate::safefs::read_regular(path, crate::safefs::Links::Follow, MAX_OPEN_BYTES)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    String::from_utf8(bytes).map_err(|_| trf("{name} n'est pas un fichier texte (UTF-8)", &[("name", &path.display())]))
+}
+
 impl OpenFile {
     pub fn open(path: &Path, uid: u64) -> Result<Self, String> {
         let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let text = String::from_utf8(bytes).map_err(|_| trf("{name} n'est pas un fichier texte (UTF-8)", &[("name", &path.display())]))?;
+        let text = read_text(&path)?;
         // Windows line endings are edited as plain newlines and written back as they were
         let crlf = text.contains("\r\n");
         let text = text.replace("\r\n", "\n");
-        let read_only = std::fs::metadata(&path).map(|m| m.permissions().readonly()).unwrap_or(false);
+        let plain = text.len() > MAX_EDIT_BYTES;
+        let read_only = plain || std::fs::metadata(&path).map(|m| m.permissions().readonly()).unwrap_or(false);
         Ok(Self {
             disk_mtime: mtime(&path),
             saved: text.clone(),
@@ -51,11 +106,17 @@ impl OpenFile {
             last_check: 0.0,
             conflict: false,
             read_only,
+            plain,
             crlf,
             error: None,
             cache: None,
+            lines: Default::default(),
             uid,
         })
+    }
+
+    pub fn uid(&self) -> u64 {
+        self.uid
     }
 
     pub fn name(&self) -> String {
@@ -70,12 +131,50 @@ impl OpenFile {
         self.text != self.saved
     }
 
+    /// The file as a note, for exports.
+    pub fn as_note(&self) -> model::Note {
+        model::Note { id: self.uid, text: self.text.clone(), created: now(), modified: now(), pinned: false, archived: false, trashed: false, attachments: vec![] }
+    }
+
+    fn disk_text(&self) -> String {
+        if self.crlf { self.text.replace('\n', "\r\n") } else { self.text.clone() }
+    }
+
+    /// The file changed on disk since it was read or saved here.
+    pub fn changed_on_disk(&self) -> bool {
+        mtime(&self.path) != self.disk_mtime
+    }
+
+    /// Unsaved edits that would overwrite changes made by another program.
+    pub fn in_conflict(&mut self) -> bool {
+        if self.dirty() && !self.read_only && (self.conflict || self.changed_on_disk()) {
+            self.conflict = true;
+        }
+        self.conflict && self.dirty()
+    }
+
+    /// Keep this window's text in a new file next to the original ("name (my version).md").
+    pub fn save_copy(&self) -> Result<PathBuf, String> {
+        let stem = self.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        let ext = self.path.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
+        let mine = tr("ma version");
+        let mut last = String::new();
+        for k in 1..100 {
+            let name = if k == 1 { format!("{stem} ({mine}){ext}") } else { format!("{stem} ({mine} {k}){ext}") };
+            match crate::safefs::write_new(&self.dir().join(&name), self.disk_text().as_bytes(), 0o644) {
+                Ok(()) => return Ok(self.dir().join(name)),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => last = e.to_string(),
+            }
+        }
+        Err(last)
+    }
+
     pub fn save(&mut self) -> Result<(), String> {
         if self.read_only {
             return Err(tr("Ce fichier est en lecture seule.").to_string());
         }
-        let out = if self.crlf { self.text.replace('\n', "\r\n") } else { self.text.clone() };
-        std::fs::write(&self.path, out).map_err(|e| e.to_string())?;
+        write_file(&self.path, self.disk_text().as_bytes())?;
         self.saved = self.text.clone();
         self.disk_mtime = mtime(&self.path);
         self.conflict = false;
@@ -84,10 +183,14 @@ impl OpenFile {
     }
 
     fn reload(&mut self) {
-        match std::fs::read_to_string(&self.path) {
+        match read_text(&self.path) {
             Ok(t) => {
                 self.crlf = t.contains("\r\n");
                 let t = t.replace("\r\n", "\n");
+                if t.len() > MAX_EDIT_BYTES {
+                    self.plain = true;
+                    self.read_only = true;
+                }
                 self.saved = t.clone();
                 self.text = t;
                 self.disk_mtime = mtime(&self.path);
@@ -95,7 +198,7 @@ impl OpenFile {
                 self.error = None;
                 self.cache = None;
             }
-            Err(e) => self.error = Some(e.to_string()),
+            Err(e) => self.error = Some(e),
         }
     }
 
@@ -119,15 +222,10 @@ impl OpenFile {
         }
     }
 
-    /// Resolve a picture or link target written in the file.
-    pub fn resolve(&self, target: &str) -> PathBuf {
-        let decoded = target.replace("%20", " ");
-        let p = Path::new(&decoded);
-        if p.is_absolute() {
-            p.to_path_buf()
-        } else {
-            self.dir().join(p)
-        }
+    /// Resolve a picture or link target written in the file: only inside the file's own
+    /// folder (no absolute path, no "..", no link leading out of it).
+    pub fn resolve(&self, target: &str) -> Option<PathBuf> {
+        crate::safefs::confine(&self.dir(), target)
     }
 }
 
@@ -165,6 +263,12 @@ impl GrassApp {
         if i >= self.files.len() {
             return;
         }
+        // never save silently over a file another program changed: ask first
+        if self.files[i].in_conflict() {
+            self.active_file = Some(i);
+            self.conflict_prompt = Some(ConflictPrompt { uid: self.files[i].uid, then: AfterConflict::Close });
+            return;
+        }
         if self.files[i].dirty() {
             if let Err(e) = self.files[i].save() {
                 self.notify(ctx, trf("Fichier non enregistré : {e}", &[("e", &e)]));
@@ -175,6 +279,176 @@ impl GrassApp {
         self.active_file = if self.files.is_empty() { None } else { Some(i.min(self.files.len() - 1)) };
     }
 
+    /// Export an open file, at `at` (chosen in a Save panel) or in the default export folder.
+    pub(super) fn write_file_export(&mut self, ctx: &egui::Context, i: usize, fmt: Format, at: Option<PathBuf>) {
+        let f = &self.files[i];
+        let note = f.as_note();
+        let res = match at {
+            Some(p) => export::export_note_at(&note, fmt, &p, &f.dir()),
+            None => export::export_note_with(&note, fmt, &Self::export_dir(), &f.dir()),
+        };
+        let msg = match res {
+            Ok(p) => trf("Exporté : {0}", &[("0", &p.display())]),
+            Err(e) => trf("Export impossible : {e}", &[("e", &e)]),
+        };
+        self.notify(ctx, msg);
+    }
+
+    /// Before the window closes: files in conflict are settled one by one with the user.
+    pub(super) fn check_quit(&mut self, ctx: &egui::Context) {
+        if !ctx.input(|i| i.viewport().close_requested()) || self.quit_confirmed {
+            return;
+        }
+        if let Some(i) = self.files.iter_mut().position(|f| f.in_conflict()) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.show_settings = false;
+            self.active_file = Some(i);
+            self.conflict_prompt = Some(ConflictPrompt { uid: self.files[i].uid, then: AfterConflict::Quit });
+        }
+    }
+
+    /// The "Keep mine / Keep theirs / Save as" question for a file in conflict.
+    pub(super) fn conflict_window(&mut self, ctx: &egui::Context) {
+        let Some(prompt) = self.conflict_prompt else { return };
+        let Some(i) = self.files.iter().position(|f| f.uid == prompt.uid) else {
+            self.conflict_prompt = None;
+            return;
+        };
+        let t = self.theme();
+        let name = self.files[i].name();
+        #[derive(PartialEq)]
+        enum Choice {
+            Mine,
+            Theirs,
+            SaveAs,
+            Cancel,
+        }
+        let mut choice = None;
+        egui::Modal::new(Id::unique("file-conflict")).show(ctx, |ui| {
+            ui.set_max_width(480.0);
+            ui.label(egui::RichText::new(trf("« {name} » a été modifié par un autre programme pendant que vous le modifiiez ici.", &[("name", &name)])).font(FontId::new(16.0, FontFamily::Name("bold".into()))).color(t.text));
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new(tr("Quelle version garder ? « Enregistrer sous… » garde les deux : votre version va dans un nouveau fichier.")).color(t.muted));
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if ui.button(tr("Garder ma version")).clicked() {
+                    choice = Some(Choice::Mine);
+                }
+                if ui.button(tr("Garder la leur")).clicked() {
+                    choice = Some(Choice::Theirs);
+                }
+                if ui.button(tr("Enregistrer sous…")).clicked() {
+                    choice = Some(Choice::SaveAs);
+                }
+                if ui.button(tr("Annuler")).clicked() {
+                    choice = Some(Choice::Cancel);
+                }
+            });
+        });
+        let Some(choice) = choice else { return };
+        self.conflict_prompt = None;
+        let settled = match choice {
+            Choice::Mine => match self.files[i].save() {
+                Ok(()) => true,
+                Err(e) => {
+                    self.notify(ctx, trf("Fichier non enregistré : {e}", &[("e", &e)]));
+                    false
+                }
+            },
+            Choice::Theirs => {
+                self.files[i].reload();
+                true
+            }
+            Choice::SaveAs if self.screenshot.is_none() && crate::portal::available() => {
+                let f = &self.files[i];
+                let rx = crate::portal::ask(ctx, tr("Enregistrer sous…").to_string(), crate::portal::Ask::Save { name: f.name() }, Some(f.dir()));
+                self.save_as_panel = Some((prompt, rx));
+                false
+            }
+            Choice::SaveAs => match self.files[i].save_copy() {
+                Ok(p) => {
+                    self.notify(ctx, trf("Votre version est enregistrée dans {0}", &[("0", &p.display())]));
+                    self.files[i].reload();
+                    true
+                }
+                Err(e) => {
+                    self.notify(ctx, trf("Fichier non enregistré : {e}", &[("e", &e)]));
+                    false
+                }
+            },
+            Choice::Cancel => false,
+        };
+        if settled {
+            self.after_conflict(ctx, i, prompt.then);
+        }
+    }
+
+    /// The answer of the Save panel opened by "Save as…" in a conflict.
+    pub(super) fn poll_save_as(&mut self, ctx: &egui::Context) {
+        let Some((_, rx)) = &self.save_as_panel else { return };
+        let answer = match rx.try_recv() {
+            Ok(a) => a,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => crate::portal::Answer::Unavailable,
+        };
+        let Some((prompt, _)) = self.save_as_panel.take() else { return };
+        let Some(i) = self.files.iter().position(|f| f.uid == prompt.uid) else { return };
+        let saved = match answer {
+            crate::portal::Answer::Files(p) if !p.is_empty() => {
+                let text = self.files[i].disk_text();
+                crate::safefs::write_atomic(&p[0], text.as_bytes(), 0o644).map(|_| p[0].clone()).map_err(|e| e.to_string())
+            }
+            crate::portal::Answer::Unavailable => self.files[i].save_copy(),
+            // cancelled: the question comes back
+            _ => {
+                self.conflict_prompt = Some(prompt);
+                return;
+            }
+        };
+        match saved {
+            Ok(p) => {
+                self.notify(ctx, trf("Votre version est enregistrée dans {0}", &[("0", &p.display())]));
+                self.files[i].reload();
+                self.after_conflict(ctx, i, prompt.then);
+            }
+            Err(e) => {
+                self.notify(ctx, trf("Fichier non enregistré : {e}", &[("e", &e)]));
+                self.conflict_prompt = Some(prompt);
+            }
+        }
+    }
+
+    fn after_conflict(&mut self, ctx: &egui::Context, i: usize, then: AfterConflict) {
+        match then {
+            AfterConflict::Stay => {}
+            AfterConflict::Close => self.close_file(ctx, i),
+            AfterConflict::Quit => {
+                if let Some(next) = self.files.iter_mut().position(|f| f.in_conflict()) {
+                    self.active_file = Some(next);
+                    self.conflict_prompt = Some(ConflictPrompt { uid: self.files[next].uid, then: AfterConflict::Quit });
+                } else {
+                    self.quit_confirmed = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+        }
+    }
+
+    /// Last chance when the app ends without a chance to ask (logout, a signal):
+    /// edits in conflict are kept in a copy next to the file, never written over it.
+    pub(super) fn save_files_on_exit(&mut self) {
+        for f in &mut self.files {
+            if !f.dirty() || f.read_only {
+                continue;
+            }
+            if f.in_conflict() {
+                let _ = f.save_copy();
+            } else {
+                let _ = f.save();
+            }
+        }
+    }
+
     /// Save edited files a moment after typing stops, and follow outside changes.
     pub(super) fn tick_files(&mut self, ctx: &egui::Context) {
         let now_t = ctx.input(|i| i.time);
@@ -182,6 +456,10 @@ impl GrassApp {
         for f in &mut self.files {
             f.check_disk(now_t);
             if f.dirty() && !f.conflict && !f.read_only && now_t - f.last_edit > 1.0 {
+                // changed on disk since the last check: never write over it unasked
+                if f.in_conflict() {
+                    continue;
+                }
                 if let Err(e) = f.save() {
                     f.error = Some(e.clone());
                     errors.push(e);
@@ -202,8 +480,11 @@ impl GrassApp {
         let mut out = String::with_capacity(text.len());
         for line in text.split_inclusive('\n') {
             if let Some(name) = crate::model::image_ref(line) {
-                let p = if Path::new(name).is_absolute() { PathBuf::from(name) } else { base_dir.join(name.replace("%20", " ")) };
-                if p.exists() {
+                // only pictures inside the file's own folder come along: the library is
+                // synced, so a path to any other file on the computer is never copied in
+                let picture = crate::safefs::confine(base_dir, name)
+                    .filter(|p| attach::kind_of(p, crate::safefs::Links::Refuse).map(|k| k.is_picture()).unwrap_or(false));
+                if let Some(p) = picture {
                     if let Ok(a) = attach::store(id, &p) {
                         let nl = if line.ends_with('\n') { "\n" } else { "" };
                         out.push_str(&format!("![]({}){nl}", a.name));
@@ -281,7 +562,7 @@ impl GrassApp {
                 return tex.clone();
             }
         }
-        let tex = image::open(p).ok().map(|img| {
+        let tex = attach::load_picture(p, crate::safefs::Links::Refuse).map(|img| {
             let small = img.thumbnail(1000, 1000).to_rgba8();
             let ci = egui::ColorImage::from_rgba_unmultiplied([small.width() as usize, small.height() as usize], small.as_raw());
             ctx.load_texture(format!("file-pic-{}", p.display()), ci, egui::TextureOptions::LINEAR)
@@ -335,7 +616,9 @@ impl GrassApp {
                 inp.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::W)),
             )
         });
-        if save_now {
+        if save_now && self.files[i].in_conflict() {
+            self.conflict_prompt = Some(ConflictPrompt { uid: self.files[i].uid, then: AfterConflict::Stay });
+        } else if save_now {
             match self.files[i].save() {
                 Ok(()) => self.notify(&ctx, tr("Fichier enregistré")),
                 Err(e) => self.notify(&ctx, trf("Fichier non enregistré : {e}", &[("e", &e)])),
@@ -441,20 +724,25 @@ impl GrassApp {
             self.add_file_to_library(&ctx, i);
         }
         if let Some(fmt) = export_fmt {
-            let f = &self.files[i];
-            let note = model::Note { id: f.uid, text: f.text.clone(), created: now(), modified: now(), pinned: false, archived: false, trashed: false, attachments: vec![] };
-            let msg = match export::export_note_with(&note, fmt, &Self::export_dir(), &f.dir()) {
-                Ok(p) => trf("Exporté : {0}", &[("0", &p.display())]),
-                Err(e) => trf("Export impossible : {e}", &[("e", &e)]),
-            };
-            self.notify(&ctx, msg);
+            if self.export_panel.is_some() {
+                self.notify(&ctx, tr("Un export attend déjà que vous choisissiez où l'enregistrer."));
+            } else if self.screenshot.is_none() && crate::portal::available() {
+                let name = export::file_name(&self.files[i].as_note(), fmt);
+                let rx = crate::portal::ask(&ctx, tr("Exporter").to_string(), crate::portal::Ask::Save { name }, Some(Self::export_dir()));
+                self.export_panel = Some((ExportTarget::File(self.files[i].uid), fmt, rx));
+            } else {
+                self.write_file_export(&ctx, i, fmt, None);
+            }
         }
 
         // banners
-        let (conflict, err, read_only) = {
+        let (conflict, mut err, read_only) = {
             let f = &self.files[i];
             (f.conflict, f.error.clone(), f.read_only)
         };
+        if err.is_none() && self.files[i].plain {
+            err = Some(tr("Ce fichier est trop volumineux pour être modifié ici : il s'ouvre en lecture seule, sans mise en forme.").to_string());
+        }
         if conflict || err.is_some() {
             egui::Frame::new().fill(t.highlight_bg.gamma_multiply(0.6)).inner_margin(Margin::symmetric(16, 8)).show(ui, |ui| {
                 ui.set_width(ui.available_width());
@@ -483,7 +771,7 @@ impl GrassApp {
             .collect();
         let mut pics: Vec<(String, egui::TextureHandle, bool)> = Vec::new();
         for name in refs {
-            let p = self.files[i].resolve(&name);
+            let Some(p) = self.files[i].resolve(&name) else { continue };
             if let Some(tex) = self.file_texture(&ctx, &p) {
                 pics.push((name, tex, false));
             }
@@ -524,7 +812,9 @@ impl GrassApp {
                 let style_key = (settings.theme, settings.font_size.to_bits(), settings.editor_font as u8, settings.dim_markup, settings.line_spacing.to_bits(), reading, img_key);
                 ui.horizontal(|ui| {
                     ui.add_space(side);
+                    let plain = f.plain;
                     let cache = &mut f.cache;
+                    let lines = &mut f.lines;
                     let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap: f32| {
                         use std::hash::{Hash, Hasher};
                         let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -535,7 +825,7 @@ impl GrassApp {
                         let job = match cache {
                             Some((k, job)) if *k == key => job.clone(),
                             _ => {
-                                let job = markdown::layout_job(buf.as_str(), &style, wrap);
+                                let job = if plain { markdown::plain_job(buf.as_str(), &style, wrap) } else { markdown::layout_job_cached(buf.as_str(), &style, wrap, lines) };
                                 *cache = Some((key, job.clone()));
                                 job
                             }
@@ -603,27 +893,69 @@ impl GrassApp {
         if edited {
             f.last_edit = now_t;
         }
-        if let Some(name) = open_pic {
-            let p = f.resolve(&name);
-            let _ = crate::platform::open_path(&p);
-        }
-        if let Some(b) = link_at {
-            let target = link_target(&f.text, b);
-            let base = f.dir();
-            if let Some(target) = target {
-                if target.starts_with("http://") || target.starts_with("https://") || target.starts_with("mailto:") {
-                    let _ = crate::platform::open(&target);
-                } else if !target.starts_with('#') {
-                    let path_part = target.split('#').next().unwrap_or("").replace("%20", " ");
-                    let p = if Path::new(&path_part).is_absolute() { PathBuf::from(&path_part) } else { base.join(&path_part) };
-                    if p.exists() && is_markdown(&p) {
-                        self.open_files(&ctx, vec![p]);
-                    } else if p.exists() {
-                        let _ = crate::platform::open_path(&p);
-                    }
-                }
+        if let Some(p) = open_pic.and_then(|name| f.resolve(&name)) {
+            if attach::opens_safely(&p, crate::safefs::Links::Refuse) {
+                let _ = crate::platform::open_path(&p);
+            } else {
+                self.pending_open = Some(OpenRequest::File(p));
             }
         }
+        if let Some(target) = link_at.and_then(|b| link_target(&f.text, b)) {
+            let base = f.dir();
+            match link_action(&base, &target) {
+                LinkAction::OpenHere(p) => self.open_files(&ctx, vec![p]),
+                LinkAction::OpenPicture(p) => {
+                    let _ = crate::platform::open_path(&p);
+                }
+                LinkAction::Ask(req) => self.pending_open = Some(req),
+                LinkAction::Unsupported => self.notify(&ctx, trf("Ce type de lien n'est pas pris en charge : {0}", &[("0", &target)])),
+                LinkAction::Nothing => {}
+            }
+        }
+    }
+}
+
+/// What a click on a link in a Markdown file does.
+#[derive(Debug, PartialEq)]
+enum LinkAction {
+    /// a Markdown file inside the file's folder: opened in this window
+    OpenHere(PathBuf),
+    /// a picture inside the file's folder: opened with the default app
+    OpenPicture(PathBuf),
+    /// a web address, or a file elsewhere or of another type: shown to the user first
+    Ask(OpenRequest),
+    /// another scheme (ftp:, smb:, javascript:…)
+    Unsupported,
+    /// a missing file or an anchor in the same file
+    Nothing,
+}
+
+fn link_action(base: &Path, target: &str) -> LinkAction {
+    if crate::platform::is_web_link(target) {
+        return LinkAction::Ask(OpenRequest::Link(target.to_string()));
+    }
+    if target.starts_with('#') {
+        return LinkAction::Nothing;
+    }
+    if crate::platform::has_scheme(target) {
+        return LinkAction::Unsupported;
+    }
+    let path_part = target.split('#').next().unwrap_or("");
+    if let Some(p) = crate::safefs::confine(base, path_part) {
+        if is_markdown(&p) && p.is_file() {
+            return LinkAction::OpenHere(p);
+        }
+        if attach::opens_safely(&p, crate::safefs::Links::Refuse) {
+            return LinkAction::OpenPicture(p);
+        }
+    }
+    // anything else (absolute, "..", another type) is named to the user before it opens
+    let decoded = path_part.replace("%20", " ");
+    let p = if Path::new(&decoded).is_absolute() { PathBuf::from(&decoded) } else { base.join(&decoded) };
+    if p.exists() {
+        LinkAction::Ask(OpenRequest::File(p))
+    } else {
+        LinkAction::Nothing
     }
 }
 
@@ -683,11 +1015,15 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("Lisez-moi.md");
         std::fs::write(&p, "# Titre\r\n\r\nVoir [l'autre](Autre%20page.md) et ![plan](img/plan.png \"Plan\")\r\n").unwrap();
+        std::fs::write(dir.join("Autre page.md"), "# Autre\n").unwrap();
         let mut f = OpenFile::open(&p, 1).unwrap();
         assert!(!f.text.contains('\r'), "Windows line endings are normalised");
         assert_eq!(crate::model::image_ref("![plan](img/plan.png \"Plan\")"), Some("img/plan.png"));
         assert_eq!(crate::model::image_ref("![a](<mon image.png>)"), Some("mon image.png"));
-        assert_eq!(f.resolve("Autre%20page.md"), dir.canonicalize().unwrap().join("Autre page.md"));
+        assert_eq!(f.resolve("Autre%20page.md"), Some(dir.canonicalize().unwrap().join("Autre page.md")));
+        // nothing outside the file's folder
+        assert_eq!(f.resolve("/etc/passwd"), None);
+        assert_eq!(f.resolve("../Lisez-moi.md"), None);
         f.text.push_str("Ajout\n");
         f.save().unwrap();
         // the file came with Windows line endings and keeps them
@@ -697,5 +1033,157 @@ mod tests {
         assert_eq!(link_target("lien https://example.org fin", 10).as_deref(), Some("https://example.org"));
         assert_eq!(link_target("voir [[Notes]]", 9).as_deref(), Some("Notes.md"));
     }
-    
+
+    #[cfg(unix)]
+    #[test]
+    fn saving_is_atomic_keeps_the_mode_and_never_follows_links() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("gf-save-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("note.md");
+        std::fs::write(&p, "v1").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let mut f = OpenFile::open(&p, 1).unwrap();
+        f.text = "v2".into();
+        f.save().unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "v2");
+        assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o640, "mode kept");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "no temporary file left");
+        // a link appears where the file was: refused, the link's target untouched
+        let target = dir.join("target.md");
+        std::fs::write(&target, "cible").unwrap();
+        std::fs::remove_file(&p).unwrap();
+        std::os::unix::fs::symlink(&target, &p).unwrap();
+        f.text = "v3".into();
+        assert!(f.save().is_err());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "cible");
+        assert!(std::fs::symlink_metadata(&p).unwrap().file_type().is_symlink());
+    }
+
+    /// A folder that is not writable: the file is written in place (same inode), after a
+    /// backup that is removed once the text is on disk. Extended attributes are kept by a
+    /// normal save.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn saving_keeps_attributes_and_works_in_a_read_only_folder() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let _guard = crate::tests::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let base = std::env::temp_dir().join(format!("gf-save-inplace-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::env::set_var("GRASSFIELD_DATA", base.join("data").join("library.json"));
+        let dir = base.join("doc");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("note.md");
+        std::fs::write(&p, "v1").unwrap();
+        // an extended attribute (where the file system supports them)
+        let name = std::ffi::CString::new("user.grassfield.test").unwrap();
+        let cpath = std::ffi::CString::new(p.to_str().unwrap()).unwrap();
+        let has_xattr = unsafe { libc::setxattr(cpath.as_ptr(), name.as_ptr(), b"kept".as_ptr() as *const libc::c_void, 4, 0) } == 0;
+        let mut f = OpenFile::open(&p, 1).unwrap();
+        f.text = "v2".into();
+        f.save().unwrap();
+        if has_xattr {
+            let mut buf = [0u8; 16];
+            let n = unsafe { libc::getxattr(cpath.as_ptr(), name.as_ptr(), buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+            assert_eq!(&buf[..n.max(0) as usize], b"kept", "extended attribute lost");
+        }
+        // now the folder cannot be written: the save goes in place
+        let ino = std::fs::metadata(&p).unwrap().ino();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        f.text = "v3, longer than before".into();
+        let res = f.save();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        res.unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "v3, longer than before");
+        assert_eq!(std::fs::metadata(&p).unwrap().ino(), ino, "written in place");
+        let backups = base.join("data").join("backups");
+        assert_eq!(std::fs::read_dir(&backups).map(|r| r.count()).unwrap_or(0), 0, "the backup is removed after a good save");
+        f.text = "v4".into();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let res = f.save();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        res.unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "v4", "a shorter text leaves nothing behind");
+        std::env::remove_var("GRASSFIELD_DATA");
+    }
+
+    #[test]
+    fn a_conflict_is_never_saved_silently() {
+        let dir = std::env::temp_dir().join(format!("gf-conflict-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("note.md");
+        std::fs::write(&p, "v1").unwrap();
+        let mut f = OpenFile::open(&p, 1).unwrap();
+        f.text = "mine".into();
+        // another program writes the file (with a clearly different modification time)
+        std::fs::write(&p, "theirs").unwrap();
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+        std::fs::File::options().write(true).open(&p).unwrap().set_modified(later).unwrap();
+        assert!(f.in_conflict());
+        let copy = f.save_copy().unwrap();
+        assert_eq!(copy.file_name().unwrap().to_string_lossy(), "note (ma version).md");
+        assert_eq!(std::fs::read_to_string(&copy).unwrap(), "mine");
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "theirs", "the other program's change is kept");
+        // a second copy never overwrites the first
+        let copy2 = f.save_copy().unwrap();
+        assert_ne!(copy, copy2);
+    }
+
+    #[test]
+    fn links_only_open_unasked_inside_the_folder() {
+        let dir = std::env::temp_dir().join(format!("gf-links-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sous")).unwrap();
+        std::fs::write(dir.join("autre.md"), "# a").unwrap();
+        std::fs::write(dir.join("sous/photo.png"), b"\x89PNG\r\n\x1a\n....").unwrap();
+        std::fs::write(dir.join("faux.png"), b"#!/bin/sh\necho pwned\n").unwrap();
+        std::fs::write(dir.join("photo.desktop"), b"\x89PNG\r\n\x1a\n....").unwrap();
+        std::fs::write(dir.join("script.sh"), b"#!/bin/sh\n").unwrap();
+        let base = dir.canonicalize().unwrap();
+        assert_eq!(link_action(&base, "autre.md"), LinkAction::OpenHere(base.join("autre.md")));
+        assert_eq!(link_action(&base, "sous/photo.png"), LinkAction::OpenPicture(base.join("sous/photo.png")));
+        assert_eq!(link_action(&base, "https://example.org/x"), LinkAction::Ask(OpenRequest::Link("https://example.org/x".into())));
+        assert_eq!(link_action(&base, "mailto:a@b.c"), LinkAction::Ask(OpenRequest::Link("mailto:a@b.c".into())));
+        assert_eq!(link_action(&base, "javascript:alert(1)"), LinkAction::Unsupported);
+        assert_eq!(link_action(&base, "file:///etc/passwd"), LinkAction::Unsupported);
+        assert_eq!(link_action(&base, "#titre"), LinkAction::Nothing);
+        assert_eq!(link_action(&base, "absent.md"), LinkAction::Nothing);
+        // a picture name with other content, a picture content with another name, a script
+        for name in ["faux.png", "photo.desktop", "script.sh"] {
+            assert_eq!(link_action(&base, name), LinkAction::Ask(OpenRequest::File(base.join(name))), "{name}");
+        }
+        // anything outside the folder is named first, even Markdown
+        let outside = link_action(&base.join("sous"), "../autre.md");
+        assert_eq!(outside, LinkAction::Ask(OpenRequest::File(base.join("sous").join("../autre.md"))));
+        assert!(matches!(link_action(&base, "/etc/hostname"), LinkAction::Ask(_) | LinkAction::Nothing));
+    }
+
+    #[test]
+    fn big_files_open_read_only_and_plain() {
+        let dir = std::env::temp_dir().join(format!("gf-bigfile-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("gros.md");
+        std::fs::write(&p, "*a ".repeat(MAX_EDIT_BYTES / 3 + 10)).unwrap();
+        let f = OpenFile::open(&p, 1).unwrap();
+        assert!(f.plain && f.read_only);
+        let small = dir.join("petit.md");
+        std::fs::write(&small, "# ok\n").unwrap();
+        let f = OpenFile::open(&small, 2).unwrap();
+        assert!(!f.plain && !f.read_only);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_named_pipe_never_hangs_the_window() {
+        let dir = std::env::temp_dir().join(format!("gf-fifo-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("piege.md");
+        let _ = std::fs::remove_file(&p);
+        assert!(std::process::Command::new("mkfifo").arg(&p).status().unwrap().success());
+        // returns at once with an error instead of waiting for a writer
+        assert!(OpenFile::open(&p, 1).is_err());
+    }
+
 }

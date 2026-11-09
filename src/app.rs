@@ -41,6 +41,30 @@ enum SettingsPage {
     Shortcuts,
 }
 
+/// Something outside the app the user asked to open: shown to them first.
+#[derive(Clone, Debug, PartialEq)]
+enum OpenRequest {
+    /// a web or mail address, shown in full
+    Link(String),
+    /// a file outside the note's folder, or of a type that is never opened unasked
+    File(PathBuf),
+}
+
+/// An export waiting for the user to choose where it goes (system Save panel).
+enum ExportTarget {
+    /// notes of the library
+    Notes(Vec<u64>),
+    /// a Markdown file opened on its own (by its id in `files`)
+    File(u64),
+}
+
+/// A keyring call running in the background.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SecretOp {
+    Store,
+    Forget,
+}
+
 enum Action {
     Select(u64),
     TogglePin(u64),
@@ -83,6 +107,8 @@ pub struct GrassApp {
     cursor: Option<(usize, usize)>,
     cursor_note: Option<u64>,
     layout_cache: Option<(u64, egui::text::LayoutJob)>,
+    /// styling of each line of the open note, so a keystroke only restyles its line
+    line_cache: markdown::LineCache,
     pending_cursor: Option<(usize, usize)>,
     focus_editor: bool,
     focus_search: bool,
@@ -101,6 +127,10 @@ pub struct GrassApp {
     thumbs: attach::Thumbs,
     sync_job: Option<sync::Job>,
     sync_status: Option<(bool, String)>,
+    /// token typed in the settings, not yet handed to the keyring
+    token_input: String,
+    secret_job: Option<(SecretOp, std::sync::mpsc::Receiver<Result<(), String>>)>,
+    secret_status: Option<(bool, String)>,
     last_auto_sync: f64,
     applied_icon: Option<usize>,
     icon_textures: Vec<egui::TextureHandle>,
@@ -115,6 +145,16 @@ pub struct GrassApp {
     file_seq: u64,
     /// another window owns the library: this one doesn't save notes
     other_instance: bool,
+    /// "Save as…" for a file in conflict: the system's Save panel is open
+    save_as_panel: Option<(files::ConflictPrompt, std::sync::mpsc::Receiver<crate::portal::Answer>)>,
+    /// an export whose destination is being chosen in the system's Save panel
+    export_panel: Option<(ExportTarget, Format, std::sync::mpsc::Receiver<crate::portal::Answer>)>,
+    /// a link or file waiting for the user's go-ahead
+    pending_open: Option<OpenRequest>,
+    /// a file in conflict waits for the user's choice
+    conflict_prompt: Option<files::ConflictPrompt>,
+    /// every conflict is settled: the window may close
+    quit_confirmed: bool,
     last_inbox_check: f64,
     last_lock_beat: f64,
     started: std::time::Instant,
@@ -165,6 +205,7 @@ impl GrassApp {
             cursor: None,
             cursor_note: None,
             layout_cache: None,
+            line_cache: Default::default(),
             pending_cursor: None,
             focus_editor: false,
             focus_search: false,
@@ -183,6 +224,9 @@ impl GrassApp {
             thumbs: attach::Thumbs::default(),
             sync_job: None,
             sync_status: None,
+            token_input: String::new(),
+            secret_job: None,
+            secret_status: None,
             last_auto_sync: f64::NEG_INFINITY,
             applied_icon: None,
             icon_textures: Vec::new(),
@@ -194,12 +238,25 @@ impl GrassApp {
             file_thumbs: Default::default(),
             file_seq: 0,
             other_instance,
+            pending_open: None,
+            export_panel: None,
+            save_as_panel: None,
+            conflict_prompt: None,
+            quit_confirmed: false,
             last_inbox_check: 0.0,
             last_lock_beat: 0.0,
             started: std::time::Instant::now(),
         };
         if !open.is_empty() {
             app.open_files(_ctx, open);
+        }
+        // a token saved in plain text by an older version moves to the system keyring,
+        // and the library is rewritten at once without it
+        let legacy = app.lib.settings.sync.token.trim().to_string();
+        if app.persist && !legacy.is_empty() {
+            app.lib.settings.sync.token_in_keyring = false;
+            app.start_secret(_ctx, SecretOp::Store, legacy);
+            app.save_now();
         }
         // For checking the look in screenshots only: GRASSFIELD_SHOT_STATE=dark,info,settings,focus,trash,tag
         if app.screenshot.is_some() {
@@ -233,7 +290,7 @@ impl GrassApp {
                             app.settings_page = SettingsPage::Export;
                         }
                         "edit" => app.file_reading = false,
-                        "picker" => app.picker.start(Purpose::Scan),
+                        "picker" => app.picker.start_builtin(Purpose::Scan),
                         "sketch" => {
                             if let Some(id) = app.selected {
                                 app.open_sketch(id, None);
@@ -472,7 +529,7 @@ impl GrassApp {
                     self.notify(ctx, crate::i18n::trf("Tag #{t} retiré des notes", &[("t", &t as &dyn std::fmt::Display)]));
                     self.mark_dirty(ctx);
                 }
-                Action::PickFiles(purpose) => self.picker.start(purpose),
+                Action::PickFiles(purpose) => self.picker.start(ctx, purpose),
                 Action::RemoveAttachment(id, name) => {
                     if let Some(n) = self.lib.get_mut(id) {
                         n.attachments.retain(|a| a.name != name);
@@ -496,8 +553,14 @@ impl GrassApp {
                     self.mark_dirty(ctx);
                 }
                 Action::OpenAttachment(id, name) => {
+                    // attachments may come from a synced repository: only pictures and PDFs
+                    // (by name and by content) open directly; anything else is shown in its folder
                     let p = model::Library::attachment_dir(id).join(&name);
-                    let _ = crate::platform::open_path(&p);
+                    if attach::opens_safely(&p, crate::safefs::Links::Refuse) {
+                        let _ = crate::platform::open_path(&p);
+                    } else {
+                        let _ = crate::platform::reveal(&p);
+                    }
                 }
                 Action::SyncNow => self.start_sync(ctx),
                 Action::NewSketch(id) => self.open_sketch(id, None),
@@ -544,8 +607,67 @@ impl GrassApp {
             .join("Grassfield Notes")
     }
 
+    /// Export notes: the system's Save panel picks the file (or the folder, for several
+    /// notes) when there is one; otherwise they go to the default export folder.
     fn export(&mut self, ctx: &egui::Context, ids: &[u64], format: Format) {
-        let dir = Self::export_dir();
+        if self.export_panel.is_some() {
+            // never send this export somewhere the user did not choose
+            self.notify(ctx, crate::i18n::tr("Un export attend déjà que vous choisissiez où l'enregistrer."));
+            return;
+        }
+        if self.screenshot.is_none() && crate::portal::available() {
+            let title = crate::i18n::tr("Exporter").to_string();
+            let ask = match ids {
+                [one] => match self.lib.get(*one) {
+                    Some(n) => crate::portal::Ask::Save { name: export::file_name(n, format) },
+                    None => return,
+                },
+                _ => crate::portal::Ask::Folder,
+            };
+            let rx = crate::portal::ask(ctx, title, ask, Some(Self::export_dir()));
+            self.export_panel = Some((ExportTarget::Notes(ids.to_vec()), format, rx));
+            return;
+        }
+        self.export_to_folder(ctx, ids, format, Self::export_dir());
+    }
+
+    /// The answer of the Save panel opened by an export.
+    fn poll_export_panel(&mut self, ctx: &egui::Context) {
+        let Some((_, _, rx)) = &self.export_panel else { return };
+        let answer = match rx.try_recv() {
+            Ok(a) => a,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => crate::portal::Answer::Unavailable,
+        };
+        let Some((target, format, _)) = self.export_panel.take() else { return };
+        match (target, answer) {
+            (_, crate::portal::Answer::Cancelled) => {}
+            (ExportTarget::Notes(ids), crate::portal::Answer::Files(paths)) => {
+                let Some(path) = paths.into_iter().next() else { return };
+                if ids.len() == 1 {
+                    let res = self.lib.get(ids[0]).map(|n| export::export_note_at(n, format, &path, &Library::attachment_dir(n.id)));
+                    match res {
+                        Some(Ok(p)) => self.notify(ctx, crate::i18n::trf("Exporté : {0}", &[("0", &p.display() as &dyn std::fmt::Display)])),
+                        Some(Err(e)) => self.notify(ctx, crate::i18n::trf("Export impossible : {e}", &[("e", &e as &dyn std::fmt::Display)])),
+                        None => {}
+                    }
+                } else {
+                    self.export_to_folder(ctx, &ids, format, path);
+                }
+            }
+            (ExportTarget::Notes(ids), crate::portal::Answer::Unavailable) => self.export_to_folder(ctx, &ids, format, Self::export_dir()),
+            (ExportTarget::File(uid), answer) => {
+                let Some(i) = self.files.iter().position(|f| f.uid() == uid) else { return };
+                let at = match answer {
+                    crate::portal::Answer::Files(p) => p.into_iter().next(),
+                    _ => None,
+                };
+                self.write_file_export(ctx, i, format, at);
+            }
+        }
+    }
+
+    fn export_to_folder(&mut self, ctx: &egui::Context, ids: &[u64], format: Format, dir: PathBuf) {
         let mut count = 0;
         let mut last_err = None;
         for id in ids {
@@ -684,10 +806,55 @@ impl GrassApp {
         self.last_auto_sync = ctx.input(|i| i.time);
     }
 
+    /// Store or forget the sync token in the system keyring, in the background.
+    fn start_secret(&mut self, ctx: &egui::Context, op: SecretOp, token: String) {
+        if !self.persist {
+            return;
+        }
+        // usable right away, whatever the keyring answers
+        let t = token.clone();
+        self.lib.settings.sync.token = token;
+        let rx = match op {
+            SecretOp::Store => crate::secrets::spawn(ctx, move || crate::secrets::store(&t)),
+            SecretOp::Forget => crate::secrets::spawn(ctx, crate::secrets::delete),
+        };
+        self.secret_job = Some((op, rx));
+    }
+
+    fn poll_secret(&mut self, ctx: &egui::Context) {
+        let Some((op, rx)) = &self.secret_job else { return };
+        let Ok(res) = rx.try_recv() else { return };
+        let op = *op;
+        self.secret_job = None;
+        let s = &mut self.lib.settings.sync;
+        self.secret_status = Some(match (op, res) {
+            (SecretOp::Store, Ok(())) => {
+                s.token_in_keyring = true;
+                (true, crate::i18n::tr("Jeton enregistré dans le trousseau du système").to_string())
+            }
+            (SecretOp::Store, Err(e)) => {
+                s.token_in_keyring = false;
+                (false, crate::i18n::trf("Trousseau du système indisponible ({e}) : le jeton n'est gardé que jusqu'à la fermeture de Grassfield Notes.", &[("e", &e)]))
+            }
+            (SecretOp::Forget, Ok(())) => {
+                s.token_in_keyring = false;
+                (true, crate::i18n::tr("Jeton retiré du trousseau du système").to_string())
+            }
+            (SecretOp::Forget, Err(e)) => (false, crate::i18n::trf("Le jeton n'a pas pu être retiré du trousseau du système : {e}", &[("e", &e)])),
+        });
+        self.mark_dirty(ctx);
+    }
+
     fn poll_background(&mut self, ctx: &egui::Context) {
+        self.poll_secret(ctx);
+        self.poll_export_panel(ctx);
+        self.poll_save_as(ctx);
         if let Some(job) = &self.sync_job {
             if let Some(out) = job.poll() {
                 self.sync_job = None;
+                if let Some(t) = out.token.clone() {
+                    self.lib.settings.sync.token = t;
+                }
                 if let Some(m) = out.merge {
                     sync::apply(&mut self.lib, m);
                     // pictures may have changed on the other computer
@@ -903,6 +1070,9 @@ impl eframe::App for GrassApp {
         }
         self.rename_window(&ctx);
         self.confirm_window(&ctx);
+        self.open_window(&ctx);
+        self.check_quit(&ctx);
+        self.conflict_window(&ctx);
         self.toast(&ctx);
         self.run_actions(&ctx);
 
@@ -922,11 +1092,7 @@ impl eframe::App for GrassApp {
         if self.dirty {
             self.save_now();
         }
-        for f in &mut self.files {
-            if f.dirty() {
-                let _ = f.save();
-            }
-        }
+        self.save_files_on_exit();
         if self.persist {
             instance_lock::release();
         }

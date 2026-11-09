@@ -2,8 +2,19 @@
 //!
 //! Each note is one Markdown file `notes/<id>-<title>.md` with a small header holding its
 //! dates and flags; attachments go to `attachments/<id>/`. The newest edit of a note wins.
+//!
+//! The repository is shared with other people and computers, so its content is untrusted:
+//! - git runs with `core.symlinks=false`, so a committed link is checked out as a small
+//!   plain file holding the link's text, never as a link;
+//! - every file read from the repository is checked with lstat and opened with
+//!   O_NOFOLLOW (only regular files are accepted), and its real path must stay inside the
+//!   repository folder: a link left by an older checkout is never followed either;
+//! - every file written into the repository or the library replaces its target with an
+//!   atomic rename (a link at that name is replaced, never written through), and the
+//!   folders written into are checked to be real folders first.
 
 use crate::model::{now, Attachment, Library, Note, SyncSettings};
+use crate::safefs::{self, Links};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver};
@@ -22,6 +33,8 @@ pub struct Outcome {
     pub ok: bool,
     pub message: String,
     pub merge: Option<Merge>,
+    /// The token read from the keyring for this sync, kept in memory for the next ones.
+    pub token: Option<String>,
 }
 
 pub struct Job {
@@ -38,23 +51,208 @@ pub fn repo_dir() -> PathBuf {
     Library::data_dir().join("sync-repo")
 }
 
-fn auth_url(s: &SyncSettings) -> String {
-    let url = s.repo_url.trim().to_string();
-    let token = s.token.trim();
-    if !token.is_empty() {
-        if let Some(rest) = url.strip_prefix("https://") {
-            return format!("https://x-access-token:{token}@{rest}");
-        }
-    }
-    url
+/// Set when git runs this program to ask for credentials.
+pub const ASKPASS_ENV: &str = "GRASSFIELD_NOTES_ASKPASS";
+/// The path of the file holding the token (never the token itself).
+const TOKEN_FILE_ENV: &str = "GRASSFIELD_NOTES_TOKEN_FILE";
+/// Version 1.0.1 drafts passed the token itself in this variable; it is always cleared.
+const OLD_TOKEN_ENV: &str = "GRASSFIELD_NOTES_GIT_TOKEN";
+const HOST_ENV: &str = "GRASSFIELD_NOTES_GIT_HOST";
+
+/// How git signs in for one sync: the token, and the only server it may be given to.
+pub(crate) struct Auth {
+    token: String,
+    host: String,
+    /// where the askpass helper reads the token during this sync
+    file: Option<TokenFile>,
 }
 
-fn git(dir: &Path, args: &[&str], token: &str) -> Result<String, String> {
-    let out = crate::platform::command("git")
-        .current_dir(dir)
-        .args(args)
+/// The token, for the askpass helper only: a 0600 file in a 0700 folder of the user's
+/// runtime directory (or of the private data folder), removed when the sync ends. git and
+/// the programs it starts (hooks, filters, ssh) only ever see the file's path.
+pub(crate) struct TokenFile {
+    path: PathBuf,
+}
+
+impl TokenFile {
+    fn create(token: &str) -> std::io::Result<TokenFile> {
+        // the runtime directory first (memory only, private to the user), else the data folder
+        let mut last = std::io::Error::other("no private folder");
+        for base in dirs::runtime_dir().into_iter().chain([Library::data_dir()]) {
+            match Self::create_in(&base.join("grassfield-notes"), token) {
+                Ok(f) => return Ok(f),
+                Err(e) => last = e,
+            }
+        }
+        Err(last)
+    }
+
+    fn create_in(dir: &Path, token: &str) -> std::io::Result<TokenFile> {
+        let dir = dir.to_path_buf();
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        builder.create(&dir)?;
+        if !safefs::is_real_dir(&dir) {
+            return Err(std::io::Error::other("not a folder"));
+        }
+        #[cfg(unix)]
+        {
+            // a folder anyone else could enter is not used
+            use std::os::unix::fs::MetadataExt;
+            let meta = std::fs::symlink_metadata(&dir)?;
+            if meta.uid() != unsafe { libc::geteuid() } || meta.mode() & 0o077 != 0 {
+                return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "token folder is not private"));
+            }
+        }
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = dir.join(format!("askpass-{}-{seq}", std::process::id()));
+        safefs::write_new(&path, token.as_bytes(), 0o600)?;
+        Ok(TokenFile { path })
+    }
+}
+
+impl Drop for TokenFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// The token the askpass helper was pointed at.
+fn token_from_file(path: &Path) -> String {
+    safefs::read_regular(path, Links::Refuse, 64 * 1024)
+        .ok()
+        .and_then(|b| String::from_utf8(b).ok())
+        .unwrap_or_default()
+}
+
+/// What kind of address a repository has.
+#[derive(Debug, PartialEq)]
+enum Remote {
+    /// https: the only kind that ever receives the token (its server, lowercase)
+    Https(String),
+    /// ssh:// or git@host:path: the user's SSH key signs in
+    Ssh,
+    /// a folder on this computer (or file://): nothing travels over a network
+    Local,
+    /// http://, git:// and every other scheme: refused, they would send notes (and
+    /// possibly the token) in clear text
+    Refused(String),
+}
+
+fn remote_kind(url: &str) -> Remote {
+    let u = url.trim();
+    if let Some((scheme, _)) = u.split_once("://") {
+        return match scheme.to_ascii_lowercase().as_str() {
+            "https" => Remote::Https(url_host(u)),
+            "ssh" | "git+ssh" | "ssh+git" => Remote::Ssh,
+            "file" => Remote::Local,
+            other => Remote::Refused(other.to_string()),
+        };
+    }
+    // git's "host:path" form is SSH when a ':' comes before any '/'; a single letter is a
+    // Windows drive ("C:\notes")
+    match u.find(':') {
+        Some(i) if i > 1 && !u[..i].contains('/') => Remote::Ssh,
+        _ => Remote::Local,
+    }
+}
+
+/// The server of an https address ("github.com" in "https://github.com/a/b.git").
+fn url_host(url: &str) -> String {
+    let rest = url.trim().split_once("://").map(|(_, r)| r).unwrap_or("");
+    let authority = rest.split('/').next().unwrap_or("");
+    authority.rsplit('@').next().unwrap_or("").to_ascii_lowercase()
+}
+
+/// The askpass helper: git asks "Username for '…':" then "Password for '…':". The token is
+/// read from the private file named in the environment: it is never on a command line that
+/// `ps` shows to everyone, nor in the environment of the programs git starts.
+pub fn askpass(prompt: &str) -> i32 {
+    let env = |k| std::env::var(k).unwrap_or_default();
+    let token = std::env::var_os(TOKEN_FILE_ENV).map(|p| token_from_file(Path::new(&p))).unwrap_or_default();
+    match askpass_answer(prompt, &token, &env(HOST_ENV)) {
+        Some(answer) => {
+            println!("{answer}");
+            0
+        }
+        None => 1,
+    }
+}
+
+/// The answer to one of git's questions, only over https and only for the repository's own
+/// server: a plain http:// prompt, a prompt without a scheme, another server (a git-lfs
+/// server named by the repository, a redirect) all get nothing.
+fn askpass_answer(prompt: &str, token: &str, host: &str) -> Option<String> {
+    // "Password for 'https://x-access-token@github.com': "
+    let asked = prompt.split('\'').nth(1)?;
+    let (scheme, _) = asked.split_once("://")?;
+    if !scheme.eq_ignore_ascii_case("https") || host.is_empty() || url_host(asked) != host {
+        return None;
+    }
+    if prompt.starts_with("Username") {
+        Some("x-access-token".to_string())
+    } else if prompt.starts_with("Password") {
+        Some(token.to_string())
+    } else {
+        None
+    }
+}
+
+/// The git command for one step of a sync.
+fn git_command(dir: &Path, args: &[&str], auth: &Auth) -> std::process::Command {
+    let mut c = crate::platform::command("git");
+    c.current_dir(dir)
+        // a link committed to the repository is checked out as a plain file, never as a link
+        .args(["-c", "core.symlinks=false"]);
+    c.env_remove(OLD_TOKEN_ENV).env_remove(TOKEN_FILE_ENV);
+    // only the steps that talk to the server may sign in, and only through the file
+    let network = matches!(args.first(), Some(&"fetch") | Some(&"push"));
+    if let (true, Some(file)) = (network, &auth.file) {
+        if let Ok(exe) = std::env::current_exe() {
+            // no credential helper may store the token (some write it to a plain file)
+            c.args(["-c", "credential.helper="])
+                .env("GIT_ASKPASS", exe)
+                .env(ASKPASS_ENV, "1")
+                .env(TOKEN_FILE_ENV, &file.path)
+                .env(HOST_ENV, &auth.host);
+        }
+    }
+    // large-file servers named by the repository are never contacted
+    c.env("GIT_LFS_SKIP_SMUDGE", "1");
+    // SSH: an unknown host key is refused, never accepted on first use. The user checks
+    // the server's fingerprint once in a terminal (`ssh -T git@github.com`), which adds it
+    // to ~/.ssh/known_hosts; see SECURITY.md.
+    c.args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new")
+        .env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes -o StrictHostKeyChecking=yes");
+    c
+}
+
+/// A clearer message for an SSH server whose key is not known yet.
+fn explain(err: &str, url: &str) -> String {
+    if err.contains("Host key verification failed") || err.contains("No ED25519 host key is known") || err.contains("host key is known") {
+        let host = url.split('@').nth(1).and_then(|h| h.split([':', '/']).next()).unwrap_or("github.com");
+        return crate::i18n::trf(
+            "La clé du serveur {host} n'est pas encore connue de cet ordinateur. Ouvrez un terminal, lancez « ssh -T git@{host} », vérifiez que l'empreinte affichée est celle publiée par le service, répondez « yes », puis synchronisez de nouveau.",
+            &[("host", &host)],
+        );
+    }
+    err.trim().to_string()
+}
+
+/// Largest note file read from the repository.
+const MAX_NOTE_BYTES: u64 = 16 * 1024 * 1024;
+/// Largest attachment copied between the repository and the library.
+const MAX_ATTACHMENT_BYTES: u64 = 512 * 1024 * 1024;
+/// Mode of files written by the sync (the data folder itself is private).
+const FILE_MODE: u32 = 0o600;
+
+fn git(dir: &Path, args: &[&str], auth: &Auth) -> Result<String, String> {
+    let token = auth.token.as_str();
+    let out = git_command(dir, args, auth)
         .output()
         .map_err(|e| crate::i18n::trf("git est introuvable sur cet ordinateur ({e})", &[("e", &e as &dyn std::fmt::Display)]))?;
     let hide = |s: String| if token.is_empty() { s } else { s.replace(token, "•••") };
@@ -138,18 +336,106 @@ pub fn from_file(s: &str) -> Option<Note> {
     })
 }
 
-fn read_remote(dir: &Path) -> BTreeMap<u64, Note> {
+/// A regular file of the repository, given as a path relative to it, when it is safe to
+/// read: every folder on the way is a real folder (no link), the file itself is a regular
+/// file (lstat, no link), and its real path stays inside the repository.
+fn repo_file(root: &Path, dir: &Path, parts: &[&str]) -> Option<PathBuf> {
+    let mut p = dir.to_path_buf();
+    for (i, part) in parts.iter().enumerate() {
+        if safe_file_name(part).is_none() {
+            return None;
+        }
+        p.push(part);
+        let meta = std::fs::symlink_metadata(&p).ok()?;
+        let last = i + 1 == parts.len();
+        if (last && !meta.is_file()) || (!last && !meta.is_dir()) {
+            return None;
+        }
+    }
+    safefs::is_inside(root, &p).then_some(p)
+}
+
+pub(crate) fn read_remote(dir: &Path) -> BTreeMap<u64, Note> {
     let mut out = BTreeMap::new();
+    let Ok(root) = dir.canonicalize() else { return out };
+    if !safefs::is_real_dir(&dir.join("notes")) {
+        return out;
+    }
     if let Ok(rd) = std::fs::read_dir(dir.join("notes")) {
         for e in rd.flatten() {
-            if let Ok(s) = std::fs::read_to_string(e.path()) {
-                if let Some(n) = from_file(&s) {
-                    out.insert(n.id, n);
-                }
+            let name = e.file_name().to_string_lossy().to_string();
+            let Some(p) = repo_file(&root, dir, &["notes", &name]) else { continue };
+            let Ok(bytes) = safefs::read_regular(&p, Links::Refuse, MAX_NOTE_BYTES) else { continue };
+            if let Some(n) = String::from_utf8(bytes).ok().as_deref().and_then(from_file) {
+                out.insert(n.id, n);
             }
         }
     }
     out
+}
+
+/// Copy the attachments of notes that changed on the other side into the library.
+pub(crate) fn bring_in_attachments(dir: &Path, upserts: &[Note]) {
+    let Ok(root) = dir.canonicalize() else { return };
+    for u in upserts {
+        let id = u.id.to_string();
+        for a in &u.attachments {
+            // the other side has the newer note, so its pictures (and sketch data) win too
+            let side = crate::sketch::sidecar(Path::new(&a.name)).to_string_lossy().to_string();
+            for name in [a.name.as_str(), side.as_str()] {
+                let Some(src) = repo_file(&root, dir, &["attachments", &id, name]) else { continue };
+                let dst_dir = Library::attachment_dir(u.id);
+                if std::fs::create_dir_all(&dst_dir).is_err() || !safefs::is_real_dir(&dst_dir) {
+                    continue;
+                }
+                let _ = safefs::copy_regular(&src, Links::Refuse, &dst_dir.join(name), MAX_ATTACHMENT_BYTES, FILE_MODE);
+            }
+        }
+    }
+}
+
+/// Write the merged notes and their attachments into the repository folder.
+pub(crate) fn write_repo(dir: &Path, final_notes: &[Note]) -> std::io::Result<()> {
+    // the folders written into are real folders: a link committed as "notes" or
+    // "attachments" (or left by an older checkout) is removed, never followed
+    let notes = dir.join("notes");
+    safefs::remove_any(&notes)?;
+    safefs::ensure_real_dir(&notes)?;
+    let atts = dir.join("attachments");
+    safefs::ensure_real_dir(&atts)?;
+    for n in final_notes {
+        let name = format!("{}-{}.md", n.id, slug(&n.title()));
+        safefs::write_atomic(&notes.join(name), to_file(n).as_bytes(), FILE_MODE)?;
+        if n.attachments.is_empty() {
+            continue;
+        }
+        let dst_dir = atts.join(n.id.to_string());
+        safefs::ensure_real_dir(&dst_dir)?;
+        for a in &n.attachments {
+            let Some(name) = safe_file_name(&a.name) else { continue };
+            let src = Library::attachment_dir(n.id).join(&name);
+            if safefs::open_regular(&src, Links::Refuse).is_err() {
+                continue;
+            }
+            let _ = safefs::copy_regular(&src, Links::Refuse, &dst_dir.join(&name), MAX_ATTACHMENT_BYTES, FILE_MODE);
+            let side = crate::sketch::sidecar(&src);
+            if safefs::open_regular(&side, Links::Refuse).is_ok() {
+                let _ = safefs::copy_regular(&side, Links::Refuse, &crate::sketch::sidecar(&dst_dir.join(&name)), MAX_ATTACHMENT_BYTES, FILE_MODE);
+            }
+        }
+    }
+    // drop attachment folders of deleted notes (links are removed, never followed)
+    let keep: BTreeSet<String> = final_notes.iter().map(|n| n.id.to_string()).collect();
+    for e in std::fs::read_dir(&atts)?.flatten() {
+        if !keep.contains(&e.file_name().to_string_lossy().to_string()) {
+            let _ = safefs::remove_any(&e.path());
+        }
+    }
+    safefs::write_atomic(
+        &dir.join("README.md"),
+        crate::i18n::tr("# Notes Grassfield\n\nCe dépôt est synchronisé par Grassfield Notes. Chaque note est un fichier Markdown du dossier `notes/`.\n").as_bytes(),
+        FILE_MODE,
+    )
 }
 
 /// Decide what changes on each side. Pure function, easy to test.
@@ -195,11 +481,37 @@ pub fn merge(
 }
 
 pub(crate) fn run(settings: SyncSettings, notes: Vec<Note>, synced: BTreeSet<u64>) -> Outcome {
-    let fail = |m: String| Outcome { ok: false, message: m, merge: None };
+    let fail = |m: String| Outcome { ok: false, message: m, merge: None, token: None };
     if settings.repo_url.trim().is_empty() {
         return fail(crate::i18n::tr("Indiquez d'abord l'adresse du dépôt GitHub.").into());
     }
-    let token = settings.token.trim().to_string();
+    let mut loaded = None;
+    let mut token = settings.token.trim().to_string();
+    if token.is_empty() && settings.token_in_keyring {
+        match crate::secrets::load() {
+            Ok(t) => {
+                token = t.unwrap_or_default().trim().to_string();
+                loaded = Some(token.clone());
+            }
+            Err(e) => return fail(crate::i18n::trf("Le jeton n'a pas pu être lu dans le trousseau du système : {e}", &[("e", &e)])),
+        }
+    }
+    let url = settings.repo_url.trim().to_string();
+    // the token is only ever used over https; other schemes than https, SSH and a local
+    // folder are refused before anything is sent
+    let auth = match remote_kind(&url) {
+        Remote::Https(host) if !token.is_empty() => match TokenFile::create(&token) {
+            Ok(file) => Auth { token: token.clone(), host, file: Some(file) },
+            Err(e) => return fail(crate::i18n::trf("Le jeton n'a pas pu être transmis à git : {e}", &[("e", &e)])),
+        },
+        Remote::Https(_) | Remote::Ssh | Remote::Local => Auth { token: String::new(), host: String::new(), file: None },
+        Remote::Refused(scheme) => {
+            return fail(crate::i18n::trf(
+                "Adresse refusée ({0}://) : seules les adresses https:// et SSH (git@…) sont acceptées, pour que vos notes et votre jeton ne circulent jamais en clair.",
+                &[("0", &scheme)],
+            ))
+        }
+    };
     let branch = if settings.branch.trim().is_empty() { "main".to_string() } else { settings.branch.trim().to_string() };
     if !safe_branch(&branch) {
         return fail(crate::i18n::trf("Nom de branche invalide : {0}", &[("0", &branch)]));
@@ -209,97 +521,55 @@ pub(crate) fn run(settings: SyncSettings, notes: Vec<Note>, synced: BTreeSet<u64
         return fail(crate::i18n::trf("Dossier de synchronisation impossible à créer : {e}", &[("e", &e as &dyn std::fmt::Display)]));
     }
     if !dir.join(".git").exists() {
-        if let Err(e) = git(&dir, &["init", "-q"], &token) {
+        if let Err(e) = git(&dir, &["init", "-q"], &auth) {
             return fail(crate::i18n::trf("git init a échoué : {e}", &[("e", &e as &dyn std::fmt::Display)]));
         }
     }
-    let _ = git(&dir, &["config", "user.name", "Grassfield Notes"], &token);
-    let _ = git(&dir, &["config", "user.email", "grassfield-notes@localhost"], &token);
-    let url = auth_url(&settings);
+    let _ = git(&dir, &["config", "user.name", "Grassfield Notes"], &auth);
+    let _ = git(&dir, &["config", "user.email", "grassfield-notes@localhost"], &auth);
+    // version 1.0.0 put the token in the address, and git copied it into FETCH_HEAD
+    let fetch_head = dir.join(".git").join("FETCH_HEAD");
+    if std::fs::read_to_string(&fetch_head).map(|s| s.contains("x-access-token:")).unwrap_or(false) {
+        let _ = std::fs::remove_file(&fetch_head);
+    }
     // "--" keeps an address or branch from ever being read as a git option
-    let remote_exists = match git(&dir, &["fetch", "-q", "--", &url, &branch], &token) {
+    let remote_exists = match git(&dir, &["fetch", "-q", "--", &url, &branch], &auth) {
         Ok(_) => {
-            if let Err(e) = git(&dir, &["checkout", "-q", "-B", &branch, "FETCH_HEAD"], &token) {
+            if let Err(e) = git(&dir, &["checkout", "-q", "-B", &branch, "FETCH_HEAD"], &auth) {
                 return fail(crate::i18n::trf("Lecture du dépôt impossible : {e}", &[("e", &e as &dyn std::fmt::Display)]));
             }
-            let _ = git(&dir, &["reset", "-q", "--hard", "FETCH_HEAD"], &token);
+            let _ = git(&dir, &["reset", "-q", "--hard", "FETCH_HEAD"], &auth);
             true
         }
         Err(e) if e.contains("couldn't find remote ref") || e.contains("Couldn't find remote ref") => {
-            let _ = git(&dir, &["checkout", "-q", "-B", &branch], &token);
+            let _ = git(&dir, &["checkout", "-q", "-B", &branch], &auth);
             false // empty repository: first push
         }
-        Err(e) => return fail(crate::i18n::trf("Connexion au dépôt impossible : {0}", &[("0", &e.trim() as &dyn std::fmt::Display)])),
+        Err(e) => return fail(crate::i18n::trf("Connexion au dépôt impossible : {0}", &[("0", &explain(&e, &url) as &dyn std::fmt::Display)])),
     };
     let remote = read_remote(&dir);
     let (upserts, deletes, final_notes) = merge(&notes, &remote, &synced, remote_exists, settings.last_sync);
 
     // bring attachments of incoming notes into the library folder
-    for u in &upserts {
-        for a in &u.attachments {
-            // the other side has the newer note, so its pictures (and sketch data) win too
-            let src = dir.join("attachments").join(u.id.to_string()).join(&a.name);
-            let dst = Library::attachment_dir(u.id).join(&a.name);
-            if src.exists() {
-                let _ = std::fs::create_dir_all(Library::attachment_dir(u.id));
-                let _ = std::fs::copy(&src, &dst);
-                let side = crate::sketch::sidecar(&src);
-                if side.exists() {
-                    let _ = std::fs::copy(&side, crate::sketch::sidecar(&dst));
-                }
-            }
-        }
-    }
+    bring_in_attachments(&dir, &upserts);
     // rewrite the repository content from the merged notes
-    let _ = std::fs::remove_dir_all(dir.join("notes"));
-    if let Err(e) = std::fs::create_dir_all(dir.join("notes")) {
+    if let Err(e) = write_repo(&dir, &final_notes) {
         return fail(crate::i18n::trf("Écriture impossible : {e}", &[("e", &e as &dyn std::fmt::Display)]));
     }
-    for n in &final_notes {
-        let name = format!("{}-{}.md", n.id, slug(&n.title()));
-        if let Err(e) = std::fs::write(dir.join("notes").join(name), to_file(n)) {
-            return fail(crate::i18n::trf("Écriture impossible : {e}", &[("e", &e as &dyn std::fmt::Display)]));
-        }
-        for a in &n.attachments {
-            let src = Library::attachment_dir(n.id).join(&a.name);
-            let dst_dir = dir.join("attachments").join(n.id.to_string());
-            if src.exists() {
-                let _ = std::fs::create_dir_all(&dst_dir);
-                let _ = std::fs::copy(&src, dst_dir.join(&a.name));
-                let side = crate::sketch::sidecar(&src);
-                if side.exists() {
-                    let _ = std::fs::copy(&side, crate::sketch::sidecar(&dst_dir.join(&a.name)));
-                }
-            }
-        }
-    }
-    // drop attachment folders of deleted notes
-    let keep: BTreeSet<String> = final_notes.iter().map(|n| n.id.to_string()).collect();
-    if let Ok(rd) = std::fs::read_dir(dir.join("attachments")) {
-        for e in rd.flatten() {
-            if !keep.contains(&e.file_name().to_string_lossy().to_string()) {
-                let _ = std::fs::remove_dir_all(e.path());
-            }
-        }
-    }
-    let _ = std::fs::write(
-        dir.join("README.md"),
-        crate::i18n::tr("# Notes Grassfield\n\nCe dépôt est synchronisé par Grassfield Notes. Chaque note est un fichier Markdown du dossier `notes/`.\n"),
-    );
-    if let Err(e) = git(&dir, &["add", "-A"], &token) {
+    if let Err(e) = git(&dir, &["add", "-A"], &auth) {
         return fail(crate::i18n::trf("git add a échoué : {e}", &[("e", &e as &dyn std::fmt::Display)]));
     }
-    let changed = git(&dir, &["status", "--porcelain"], &token).map(|s| !s.trim().is_empty()).unwrap_or(true);
+    let changed = git(&dir, &["status", "--porcelain"], &auth).map(|s| !s.trim().is_empty()).unwrap_or(true);
     if changed {
         let msg = crate::i18n::trf("Synchronisation Grassfield Notes — {0}", &[("0", &chrono::Local::now().format("%d/%m/%Y %H:%M") as &dyn std::fmt::Display)]);
-        if let Err(e) = git(&dir, &["commit", "-q", "-m", &msg], &token) {
+        if let Err(e) = git(&dir, &["commit", "-q", "-m", &msg], &auth) {
             return fail(crate::i18n::trf("git commit a échoué : {e}", &[("e", &e as &dyn std::fmt::Display)]));
         }
     }
     if changed || !remote_exists {
         let refspec = format!("HEAD:refs/heads/{branch}");
-        if let Err(e) = git(&dir, &["push", "-q", "--", &url, &refspec], &token) {
-            return fail(crate::i18n::trf("Envoi vers GitHub impossible : {0}", &[("0", &e.trim() as &dyn std::fmt::Display)]));
+        if let Err(e) = git(&dir, &["push", "-q", "--", &url, &refspec], &auth) {
+            return fail(crate::i18n::trf("Envoi vers GitHub impossible : {0}", &[("0", &explain(&e, &url) as &dyn std::fmt::Display)]));
         }
     }
     let base_modified = notes.iter().map(|n| (n.id, n.modified)).collect();
@@ -311,6 +581,7 @@ pub(crate) fn run(settings: SyncSettings, notes: Vec<Note>, synced: BTreeSet<u64
         ok: true,
         message,
         merge: Some(Merge { upserts, deletes, synced_ids: final_notes.iter().map(|n| n.id).collect(), base_modified }),
+        token: loaded,
     }
 }
 
@@ -360,4 +631,101 @@ pub fn apply(lib: &mut Library, m: Merge) -> usize {
     lib.synced_ids = m.synced_ids;
     lib.settings.sync.last_sync = now();
     changes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_token_never_reaches_the_command_line() {
+        let dir = std::env::temp_dir();
+        let _guard = crate::tests::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // (where the runtime directory is not writable, the private data folder is used)
+        std::env::set_var("GRASSFIELD_DATA", std::env::temp_dir().join(format!("gf-askpass-{}", std::process::id())).join("library.json"));
+        let file = TokenFile::create("ghp_SECRET").unwrap();
+        let path = file.path.clone();
+        assert_eq!(token_from_file(&path), "ghp_SECRET");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(std::fs::metadata(path.parent().unwrap()).unwrap().permissions().mode() & 0o777, 0o700);
+        }
+        let auth = Auth { token: "ghp_SECRET".into(), host: "github.com".into(), file: Some(file) };
+        let cmd = git_command(&dir, &["fetch", "-q", "--", "https://github.com/a/b.git", "main"], &auth);
+        let envs: Vec<_> = cmd.get_envs().map(|(k, v)| (k.to_string_lossy().to_string(), v.map(|v| v.to_string_lossy().to_string()))).collect();
+        // the token is in neither the arguments nor the environment of git
+        for a in cmd.get_args() {
+            assert!(!a.to_string_lossy().contains("ghp_SECRET"), "token in argv: {a:?}");
+        }
+        for (k, v) in &envs {
+            assert!(!v.as_deref().unwrap_or("").contains("ghp_SECRET"), "token in the environment: {k}");
+        }
+        assert!(envs.iter().any(|(k, v)| k == "GIT_ASKPASS" && v.is_some()));
+        assert!(envs.iter().any(|(k, v)| k == TOKEN_FILE_ENV && v.as_deref() == Some(path.to_str().unwrap())));
+        assert!(envs.iter().any(|(k, v)| k == OLD_TOKEN_ENV && v.is_none()), "an inherited token variable is cleared");
+        // no credential helper may keep a copy of the token
+        assert!(cmd.get_args().any(|a| a == "credential.helper="));
+        // local steps never get a way to the token
+        for step in ["init", "config", "checkout", "reset", "add", "status", "commit"] {
+            let local = git_command(&dir, &[step], &auth);
+            assert!(!local.get_envs().any(|(k, v)| k == "GIT_ASKPASS" || (k == TOKEN_FILE_ENV && v.is_some())), "{step}");
+        }
+        // the file is gone when the sync ends
+        drop(auth);
+        assert!(!path.exists());
+        std::env::remove_var("GRASSFIELD_DATA");
+        // without a token, the user's own git setup is left alone
+        let plain = git_command(&dir, &["fetch"], &Auth { token: String::new(), host: String::new(), file: None });
+        assert!(!plain.get_envs().any(|(k, _)| k == "GIT_ASKPASS"));
+        assert!(!plain.get_args().any(|a| a == "credential.helper="));
+    }
+
+    #[test]
+    fn unknown_ssh_hosts_are_refused_and_explained() {
+        let cmd = git_command(&std::env::temp_dir(), &["status"], &Auth { token: String::new(), host: String::new(), file: None });
+        let ssh = cmd.get_envs().find(|(k, _)| *k == "GIT_SSH_COMMAND").and_then(|(_, v)| v).unwrap();
+        assert!(ssh.to_string_lossy().contains("StrictHostKeyChecking=yes"));
+        assert!(!ssh.to_string_lossy().contains("accept-new"));
+        let msg = explain("Host key verification failed.\nfatal: Could not read from remote repository.", "git@github.com:a/b.git");
+        assert!(msg.contains("ssh -T git@github.com"), "{msg}");
+    }
+
+    #[test]
+    fn askpass_answers_git() {
+        let h = url_host("https://GitHub.com/a/b.git");
+        assert_eq!(h, "github.com");
+        assert_eq!(askpass_answer("Username for 'https://github.com': ", "t", &h).as_deref(), Some("x-access-token"));
+        assert_eq!(askpass_answer("Password for 'https://x-access-token@github.com': ", "t", &h).as_deref(), Some("t"));
+        assert_eq!(askpass_answer("Something else", "t", &h), None);
+        // never to another server, whatever runs git's questions
+        assert_eq!(askpass_answer("Password for 'https://x-access-token@lfs.evil.example': ", "t", &h), None);
+        assert_eq!(askpass_answer("Password for 'https://github.com.evil.example': ", "t", &h), None);
+        assert_eq!(askpass_answer("Password for 'https://x-access-token@github.com': ", "t", ""), None);
+        // never over plain http, never without a scheme
+        assert_eq!(askpass_answer("Password for 'http://x-access-token@github.com': ", "t", &h), None);
+        assert_eq!(askpass_answer("Username for 'http://github.com': ", "t", &h), None);
+        assert_eq!(askpass_answer("Password for 'github.com': ", "t", &h), None);
+        assert_eq!(askpass_answer("Password for 'x-access-token@github.com': ", "t", &h), None);
+        assert_eq!(askpass_answer("Password: ", "t", &h), None);
+    }
+
+    #[test]
+    fn only_https_ssh_and_local_remotes_are_used() {
+        assert_eq!(remote_kind("https://GitHub.com/a/b.git"), Remote::Https("github.com".into()));
+        assert_eq!(remote_kind("git@github.com:a/b.git"), Remote::Ssh);
+        assert_eq!(remote_kind("ssh://git@github.com/a/b.git"), Remote::Ssh);
+        assert_eq!(remote_kind("/home/a/notes.git"), Remote::Local);
+        assert_eq!(remote_kind("file:///home/a/notes.git"), Remote::Local);
+        assert_eq!(remote_kind("C:\\notes"), Remote::Local);
+        for (url, scheme) in [("http://github.com/a/b.git", "http"), ("HTTP://github.com/a", "http"), ("git://github.com/a/b.git", "git"), ("ftp://x/y", "ftp")] {
+            assert_eq!(remote_kind(url), Remote::Refused(scheme.into()), "{url}");
+        }
+        // a sync to a plain http address stops before anything is sent
+        let settings = SyncSettings { repo_url: "http://github.com/a/b.git".into(), token: "ghp_SECRET".into(), ..Default::default() };
+        let out = run(settings, Vec::new(), BTreeSet::new());
+        assert!(!out.ok);
+        assert!(out.message.contains("http://"), "{}", out.message);
+    }
 }

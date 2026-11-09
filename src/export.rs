@@ -182,12 +182,25 @@ pub fn export_note(note: &Note, format: Format, dir: &Path) -> std::io::Result<P
     export_note_with(note, format, dir, &Library::attachment_dir(note.id))
 }
 
+/// The file name an export gets by default ("Title.pdf").
+pub fn file_name(note: &Note, format: Format) -> String {
+    format!("{}.{}", safe_name(&note.title(), note.id), format.ext())
+}
+
 /// Same, with pictures looked up in `pics` (a Markdown file's own folder, for example).
 pub fn export_note_with(note: &Note, format: Format, dir: &Path, pics: &Path) -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
-    let title = note.title();
-    let base = safe_name(&title, note.id);
+    let base = safe_name(&note.title(), note.id);
     let path = unique_path(dir, &base, format.ext());
+    export_note_at(note, format, &path, pics)
+}
+
+/// Write one note at exactly `path`, the name chosen by the user in a Save panel. The name
+/// is kept as given (no extension is added), so no other file than the one the panel
+/// asked about is ever written.
+pub fn export_note_at(note: &Note, format: Format, path: &Path, pics: &Path) -> std::io::Result<PathBuf> {
+    let path = path.to_path_buf();
+    let title = note.title();
     match format {
         Format::Txt => {
             let txt: Vec<String> = note.text.lines().map(strip_markdown_line).collect();
@@ -210,7 +223,8 @@ fn textbundle(note: &Note, path: &Path) -> std::io::Result<()> {
     let mut text = note.text.clone();
     for a in &note.attachments {
         let src = Library::attachment_dir(note.id).join(&a.name);
-        if std::fs::copy(&src, path.join("assets").join(&a.name)).is_ok() {
+        let Some(name) = crate::sync::safe_file_name(&a.name) else { continue };
+        if crate::safefs::copy_regular(&src, crate::safefs::Links::Refuse, &path.join("assets").join(&name), crate::attach::MAX_PICTURE_BYTES, 0o644).is_ok() {
             if text.contains(&format!("]({})", a.name)) {
                 text = text.replace(&format!("]({})", a.name), &format!("](assets/{})", a.name));
             } else {
@@ -395,15 +409,17 @@ pub fn epub(title: &str, text: &str, id: u64, pics: &Path) -> std::io::Result<Ve
             Block::Rule => "<hr/>".to_string(),
             Block::Blank => String::new(),
             Block::Image(n) => {
-                let p = pics.join(&n);
-                match std::fs::read(&p) {
-                    Ok(bytes) => {
+                // only pictures inside the note's own folder; the stored name and type come
+                // from the picture's content, never from the text
+                let picture = crate::safefs::confine(pics, &n).and_then(|p| crate::attach::read_picture(&p, crate::safefs::Links::Refuse));
+                match picture {
+                    Some((bytes, kind)) => {
                         let k = images.len();
-                        let ext = n.rsplit('.').next().unwrap_or("png").to_lowercase();
-                        images.push((format!("images/img{k}.{ext}"), bytes, if ext == "jpg" || ext == "jpeg" { "image/jpeg" } else { "image/png" }));
+                        let ext = kind.ext();
+                        images.push((format!("images/img{k}.{ext}"), bytes, kind.mime()));
                         format!("<p><img src=\"images/img{k}.{ext}\" alt=\"{}\" style=\"max-width:100%\"/></p>", xml(&n))
                     }
-                    Err(_) => format!("<p><em>{}</em></p>", xml(&image_placeholder(&n))),
+                    None => format!("<p><em>{}</em></p>", xml(&image_placeholder(&n))),
                 }
             }
         };

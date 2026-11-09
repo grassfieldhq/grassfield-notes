@@ -27,6 +27,25 @@ ab_glyph = "0.2"
 crc32fast = "1"
 flate2 = "1"
 
+keyring-core = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# the system keyring that holds the GitHub token
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus-secret-service-keyring-store = { version = "1", features = ["crypto-rust"] }
+# the system's Open and Save panels (XDG desktop portal), on the same D-Bus stack
+ashpd = { version = "0.13", default-features = false, features = ["async-io", "file_chooser"] }
+async-io = "2"
+futures-lite = "2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store = { version = "1", features = ["keychain"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-native-keyring-store = "1"
+
 [profile.release]
 opt-level = 3
 lto = "thin"

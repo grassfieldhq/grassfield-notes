@@ -306,9 +306,14 @@ pub struct SyncSettings {
     pub repo_url: String,
     #[serde(default)]
     pub branch: String,
-    /// Optional personal access token for HTTPS repositories.
-    #[serde(default)]
+    /// Optional personal access token for HTTPS repositories, in memory only: it is kept
+    /// in the system keyring. Version 1.0.0 saved it here in plain text; such a
+    /// token is still read once, moved to the keyring and never written back.
+    #[serde(default, skip_serializing)]
     pub token: String,
+    /// A token is saved in the system keyring.
+    #[serde(default)]
+    pub token_in_keyring: bool,
     /// Sync on start and every few minutes after changes.
     #[serde(default)]
     pub auto: bool,
@@ -389,6 +394,26 @@ impl Filter {
     }
 }
 
+/// When `name` (a tag as written, any case) is the lowercase tag `tag` or one of its
+/// children (`tag/...`), the byte length of the part of `name` that matches `tag`.
+///
+/// Works char by char on `name` itself: lowercasing can change byte lengths ("İ" is two
+/// bytes, its lowercase "i̇" three), so an offset into the lowercase text is not an
+/// offset into `name`.
+pub fn tag_match_len(name: &str, tag: &str) -> Option<usize> {
+    let mut lowered = String::with_capacity(tag.len());
+    for (i, c) in name.char_indices() {
+        if lowered == tag {
+            return name[i..].starts_with('/').then_some(i);
+        }
+        if !tag.starts_with(lowered.as_str()) {
+            return None;
+        }
+        lowered.extend(c.to_lowercase());
+    }
+    (lowered == tag).then_some(name.len())
+}
+
 pub fn tag_matches(note_tags: &BTreeSet<String>, tag: &str) -> bool {
     note_tags
         .iter()
@@ -415,32 +440,82 @@ impl Library {
 
     pub fn load_or_sample() -> Self {
         let p = Self::data_path();
+        Self::secure_data_dir();
         if let Ok(s) = std::fs::read_to_string(&p) {
             if let Ok(lib) = serde_json::from_str::<Library>(&s) {
                 return lib;
             }
             // keep a copy of an unreadable file instead of overwriting it
-            let _ = std::fs::copy(&p, p.with_extension("json.bak"));
+            let _ = crate::safefs::copy_regular(&p, crate::safefs::Links::Refuse, &p.with_extension("json.bak"), 1 << 30, 0o600);
         }
         Self::sample()
     }
 
+    /// Create the data folder when it does not exist yet: private to its owner (0700).
+    /// A folder that already exists is left as it is.
+    fn ensure_data_dir() -> std::io::Result<()> {
+        let dir = Self::data_dir();
+        if dir.as_os_str().is_empty() || dir.exists() {
+            return Ok(());
+        }
+        if let Some(parent) = dir.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        match builder.create(&dir) {
+            Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => Err(e),
+            _ => Ok(()),
+        }
+    }
+
+    /// The data folder holds private notes (and, in version 1.0.0, the sync token). At start:
+    /// - a missing folder is created 0700;
+    /// - the app's own default folder (version 1.0.0 created it 0755) is made 0700 when it
+    ///   belongs to the user; a folder named by GRASSFIELD_DATA, which may be any folder,
+    ///   is never re-permissioned;
+    /// - the library file (and its .bak) are made readable by their owner only (0600).
+    pub fn secure_data_dir() {
+        let _ = Self::ensure_data_dir();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            let uid = unsafe { libc::geteuid() };
+            let mine = |p: &std::path::Path, dir: bool| {
+                std::fs::symlink_metadata(p).map(|m| m.uid() == uid && if dir { m.is_dir() } else { m.is_file() }).unwrap_or(false)
+            };
+            let default = dirs::data_dir().map(|d| d.join("grassfield-notes"));
+            let dir = Self::data_dir();
+            if std::env::var_os("GRASSFIELD_DATA").is_none() && default.as_deref() == Some(dir.as_path()) && mine(&dir, true) {
+                let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+            }
+            for f in [Self::data_path(), Self::data_path().with_extension("json.bak")] {
+                // never change the mode of whatever a link points to
+                if mine(&f, false) {
+                    let _ = std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o600));
+                }
+            }
+        }
+    }
+
     pub fn save(&self) -> std::io::Result<()> {
         let p = Self::data_path();
-        if let Some(dir) = p.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        let tmp = p.with_extension("json.tmp");
+        Self::ensure_data_dir()?;
         let s = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
-        std::fs::write(&tmp, s)?;
-        std::fs::rename(&tmp, &p)
+        crate::safefs::write_atomic(&p, s.as_bytes(), 0o600)
     }
 
     pub fn new_note(&mut self, text: String) -> u64 {
         // Ids are based on the clock so notes made on two synced computers don't clash.
-        let clock = (chrono::Local::now().timestamp_millis().max(0) as u64) * 16;
-        let id = (self.next_id + 1).max(clock);
-        self.next_id = id;
+        let clock = (chrono::Local::now().timestamp_millis().max(0) as u64).saturating_mul(16);
+        // `next_id` can come from a synced note, so it may be as large as u64::MAX:
+        // never overflow, and never hand out an id that is already taken.
+        let mut id = self.next_id.checked_add(1).unwrap_or(clock).max(clock);
+        while id == 0 || self.notes.iter().any(|n| n.id == id) {
+            id = id.wrapping_add(1);
+        }
+        self.next_id = self.next_id.max(id);
         let t = now();
         self.notes.push(Note {
             id,
@@ -595,12 +670,11 @@ impl Library {
             let mut changed = false;
             for (s, e) in spans {
                 let name = &n.text[s + 1..e];
-                let lname = name.to_lowercase();
-                if lname == old || (lname.starts_with(old) && lname[old.len()..].starts_with('/')) {
+                if let Some(len) = tag_match_len(name, old) {
                     out.push_str(&n.text[last..s]);
                     out.push('#');
                     out.push_str(&new);
-                    out.push_str(&name[old.len()..]);
+                    out.push_str(&name[len..]);
                     last = e;
                     changed = true;
                 }
@@ -621,8 +695,7 @@ impl Library {
             let mut last = 0;
             let mut changed = false;
             for (s, e) in spans {
-                let lname = n.text[s + 1..e].to_lowercase();
-                if lname == tag || (lname.starts_with(tag) && lname[tag.len()..].starts_with('/')) {
+                if tag_match_len(&n.text[s + 1..e], tag).is_some() {
                     out.push_str(&n.text[last..s]);
                     last = e;
                     changed = true;

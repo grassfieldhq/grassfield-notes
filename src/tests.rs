@@ -255,7 +255,7 @@ fn exports_include_pictures() {
 }
 
 /// Tests that point GRASSFIELD_DATA somewhere take turns.
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 
 #[test]
@@ -269,4 +269,270 @@ fn sync_never_trusts_paths_from_the_repository() {
     let n = crate::sync::from_file(evil).unwrap();
     assert_eq!(n.attachments.len(), 1);
     assert_eq!(n.attachments[0].name, "ok.png");
+}
+
+#[test]
+fn renaming_unicode_tags_never_panics() {
+    // "İ" is two bytes but lowercases to "i̇" (three bytes): offsets must not be mixed up
+    assert_eq!(tag_match_len("İİ", "i̇i̇"), Some("İİ".len()));
+    assert_eq!(tag_match_len("İİ/sous", "i̇i̇"), Some("İİ".len()));
+    assert_eq!(tag_match_len("İİx", "i̇i̇"), None);
+    assert_eq!(tag_match_len("travail", ""), None);
+    let mut lib = Library::default();
+    let id = lib.new_note("# T\n\n#İİ/€ et #İİ/sous et #autre".into());
+    let tags = lib.get(id).unwrap().tags();
+    assert!(tags.contains("i̇i̇"), "{tags:?}");
+    lib.rename_tag("i̇i̇", "neuf");
+    assert_eq!(lib.get(id).unwrap().text, "# T\n\n#neuf/€ et #neuf/sous et #autre");
+    lib.delete_tag("neuf");
+    assert_eq!(lib.get(id).unwrap().text, "# T\n\n/€ et  et #autre");
+}
+
+#[test]
+fn note_ids_never_overflow_or_repeat() {
+    let mut lib = Library::default();
+    // a synced note can carry the largest id there is
+    lib.notes.push(Note { id: u64::MAX, text: String::new(), created: 0, modified: 0, pinned: false, archived: false, trashed: false, attachments: vec![] });
+    lib.next_id = u64::MAX;
+    let a = lib.new_note("a".into());
+    let b = lib.new_note("b".into());
+    assert!(a != u64::MAX && b != u64::MAX && a != b && a != 0 && b != 0);
+}
+
+fn git_in(dir: &std::path::Path, args: &[&str]) {
+    let ok = std::process::Command::new("git")
+        .current_dir(dir)
+        .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "init.defaultBranch=main"])
+        .args(args)
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok, "git {args:?}");
+}
+
+fn note_file(id: u64, attachments: &str, text: &str) -> String {
+    format!("---\nid: {id}\ncreated: 1\nmodified: 9999999999\npinned: false\narchived: false\ntrashed: false\nattachments: {attachments}\n---\n{text}")
+}
+
+/// A collaborator with push access commits links pointing at the victim's files.
+/// Syncing must never read through them, never write through them, and never let
+/// a name with ".." leave the repository.
+#[cfg(unix)]
+#[test]
+fn sync_never_follows_links_from_a_hostile_repository() {
+    use std::os::unix::fs::symlink;
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let base = std::env::temp_dir().join(format!("gf-hostile-sync-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    // the victim's own files (a stand-in home folder, never the real one)
+    let home = base.join("home");
+    std::fs::create_dir_all(home.join("outside/keep")).unwrap();
+    let bashrc = home.join(".bashrc");
+    // shaped like a note: if a link to it were followed, a note would appear
+    let bashrc_text = note_file(77, "[]", "shell startup file");
+    std::fs::write(&bashrc, &bashrc_text).unwrap();
+    let secret = home.join("secret.txt");
+    std::fs::write(&secret, "TOP SECRET").unwrap();
+    std::fs::write(home.join("outside/keep/file"), "keep me").unwrap();
+
+    // the attacker's repository
+    let remote = base.join("remote.git");
+    git_in(&base, &["init", "-q", "--bare", remote.to_str().unwrap()]);
+    let work = base.join("attacker");
+    git_in(&base, &["init", "-q", work.to_str().unwrap()]);
+    std::fs::create_dir_all(work.join("notes")).unwrap();
+    std::fs::create_dir_all(work.join("attachments/5")).unwrap();
+    symlink(&bashrc, work.join("notes/1-evil.md")).unwrap();
+    std::fs::write(work.join("notes/5-ok.md"), note_file(5, r#"["photo.png", "../../.bashrc"]"#, "# Ok")).unwrap();
+    symlink(&secret, work.join("attachments/5/photo.png")).unwrap();
+    std::fs::write(work.join("notes/6-dir.md"), note_file(6, r#"["x.png"]"#, "# Dir")).unwrap();
+    symlink(home.join("outside"), work.join("attachments/6")).unwrap();
+    symlink(&bashrc, work.join("README.md")).unwrap();
+    git_in(&work, &["add", "-A"]);
+    git_in(&work, &["commit", "-q", "-m", "evil"]);
+    git_in(&work, &["push", "-q", remote.to_str().unwrap(), "HEAD:refs/heads/main"]);
+
+    // the victim syncs, with one local note that has an attachment to send
+    std::env::set_var("GRASSFIELD_DATA", base.join("victim").join("library.json"));
+    let mut lib = Library::default();
+    let mine = lib.new_note("# Mine".into());
+    std::fs::create_dir_all(Library::attachment_dir(mine)).unwrap();
+    std::fs::write(Library::attachment_dir(mine).join("a.png"), "picture").unwrap();
+    lib.get_mut(mine).unwrap().attachments.push(Attachment { name: "a.png".into(), text: String::new(), read: true });
+    let settings = SyncSettings { repo_url: remote.display().to_string(), branch: "main".into(), ..Default::default() };
+    let out = crate::sync::run(settings.clone(), lib.notes.clone(), lib.synced_ids.clone());
+    assert!(out.ok, "{}", out.message);
+    crate::sync::apply(&mut lib, out.merge.unwrap());
+
+    assert_eq!(std::fs::read_to_string(&bashrc).unwrap(), bashrc_text, "the startup file was not written through");
+    assert!(lib.get(77).is_none(), "a linked note was read");
+    assert!(lib.get(5).is_some());
+    assert_eq!(lib.get(5).unwrap().attachments.len(), 1, "a name with .. was kept");
+    let pulled = std::fs::read(Library::attachment_dir(5).join("photo.png")).unwrap_or_default();
+    assert_ne!(pulled, b"TOP SECRET", "a local file was pulled into the notes");
+    let outside: Vec<_> = std::fs::read_dir(home.join("outside")).unwrap().flatten().map(|e| e.file_name()).collect();
+    assert_eq!(outside.len(), 1, "something was written into a linked folder: {outside:?}");
+    assert_eq!(std::fs::read_to_string(home.join("outside/keep/file")).unwrap(), "keep me");
+
+    // second round: the whole "attachments" folder becomes a link to the victim's files
+    git_in(&work, &["fetch", "-q", remote.to_str().unwrap(), "main"]);
+    git_in(&work, &["reset", "-q", "--hard", "FETCH_HEAD"]);
+    git_in(&work, &["rm", "-q", "-r", "attachments"]);
+    symlink(home.join("outside"), work.join("attachments")).unwrap();
+    git_in(&work, &["add", "-A"]);
+    git_in(&work, &["commit", "-q", "-m", "evil 2"]);
+    git_in(&work, &["push", "-q", remote.to_str().unwrap(), "HEAD:refs/heads/main"]);
+    let out = crate::sync::run(settings, lib.notes.clone(), lib.synced_ids.clone());
+    assert!(out.ok, "{}", out.message);
+    assert_eq!(std::fs::read_to_string(home.join("outside/keep/file")).unwrap(), "keep me", "a linked folder was emptied");
+    assert!(!home.join("outside").join(mine.to_string()).exists(), "an attachment was written into a linked folder");
+    assert_eq!(std::fs::read_to_string(&bashrc).unwrap(), bashrc_text);
+    std::env::remove_var("GRASSFIELD_DATA");
+}
+
+/// Links already present in the local copy (left by a version without the git setting)
+/// are refused as well: lstat, O_NOFOLLOW and the real-path check.
+#[cfg(unix)]
+#[test]
+fn links_already_in_the_local_copy_are_refused() {
+    use std::os::unix::fs::symlink;
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let base = std::env::temp_dir().join(format!("gf-hostile-copy-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let outside = base.join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("note.md"), note_file(42, "[]", "outside")).unwrap();
+    std::fs::write(outside.join("secret.png"), "TOP SECRET").unwrap();
+    let repo = base.join("repo");
+    std::fs::create_dir_all(repo.join("notes")).unwrap();
+    std::fs::create_dir_all(repo.join("attachments/3")).unwrap();
+    symlink(outside.join("note.md"), repo.join("notes/42-x.md")).unwrap();
+    std::fs::write(repo.join("notes/3-ok.md"), note_file(3, r#"["p.png", "d.png"]"#, "ok")).unwrap();
+    symlink(outside.join("secret.png"), repo.join("attachments/3/p.png")).unwrap();
+    // a folder link on the way
+    symlink(&outside, repo.join("attachments/3/sub")).unwrap();
+    let remote = crate::sync::read_remote(&repo);
+    assert_eq!(remote.keys().copied().collect::<Vec<_>>(), vec![3]);
+
+    std::env::set_var("GRASSFIELD_DATA", base.join("data").join("library.json"));
+    let notes: Vec<_> = remote.into_values().collect();
+    crate::sync::bring_in_attachments(&repo, &notes);
+    assert!(!Library::attachment_dir(3).join("p.png").exists(), "a linked attachment was copied");
+
+    // writing never goes through a linked "notes" folder or README
+    std::fs::remove_dir_all(repo.join("notes")).unwrap();
+    symlink(&outside, repo.join("notes")).unwrap();
+    symlink(outside.join("note.md"), repo.join("README.md")).unwrap();
+    crate::sync::write_repo(&repo, &notes).unwrap();
+    assert!(safefs_is_real_dir(&repo.join("notes")));
+    assert_eq!(std::fs::read_to_string(outside.join("note.md")).unwrap(), note_file(42, "[]", "outside"));
+    assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 2);
+    std::env::remove_var("GRASSFIELD_DATA");
+}
+
+fn safefs_is_real_dir(p: &std::path::Path) -> bool {
+    std::fs::symlink_metadata(p).map(|m| m.is_dir()).unwrap_or(false)
+}
+
+#[test]
+fn the_token_is_never_saved_with_the_notes() {
+    let mut lib = Library::sample();
+    lib.settings.sync.token = "ghp_SECRET_TOKEN".into();
+    lib.settings.sync.token_in_keyring = true;
+    let json = serde_json::to_string(&lib).unwrap();
+    assert!(!json.contains("ghp_SECRET_TOKEN"));
+    // a library saved by an older version is still read, so its token can be moved
+    let old = json.replace("\"token_in_keyring\":true", "\"token\":\"ghp_OLD\"");
+    let back: Library = serde_json::from_str(&old).unwrap();
+    assert_eq!(back.settings.sync.token, "ghp_OLD");
+    assert!(!back.settings.sync.token_in_keyring);
+}
+
+#[test]
+fn the_keyring_keeps_the_token() {
+    // tests always run against an in-memory keyring, never the real one
+    crate::secrets::store("ghp_KEYRING").unwrap();
+    assert_eq!(crate::secrets::load().unwrap().as_deref(), Some("ghp_KEYRING"));
+    crate::secrets::delete().unwrap();
+    assert_eq!(crate::secrets::load().unwrap(), None);
+    crate::secrets::delete().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn the_data_folder_is_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    // a folder the app creates is private
+    let dir = std::env::temp_dir().join(format!("gf-private-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::env::set_var("GRASSFIELD_DATA", dir.join("library.json"));
+    Library::sample().save().unwrap();
+    assert_eq!(mode(&dir), 0o700);
+    assert_eq!(mode(&dir.join("library.json")), 0o600);
+    // a folder that already exists (any folder GRASSFIELD_DATA points into) keeps its mode
+    let shared = std::env::temp_dir().join(format!("gf-existing-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&shared);
+    std::fs::create_dir_all(&shared).unwrap();
+    std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::env::set_var("GRASSFIELD_DATA", shared.join("library.json"));
+    Library::secure_data_dir();
+    Library::sample().save().unwrap();
+    assert_eq!(mode(&shared), 0o755, "an existing folder was re-permissioned");
+    assert_eq!(mode(&shared.join("library.json")), 0o600);
+    std::env::remove_var("GRASSFIELD_DATA");
+}
+
+/// Pictures written in a document are read only from its own folder, only as real
+/// pictures, and never from a pipe; exports escape what they put in attributes.
+#[cfg(unix)]
+#[test]
+fn pictures_never_leave_the_document_folder() {
+    let base = std::env::temp_dir().join(format!("gf-pictures-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let doc = base.join("doc");
+    std::fs::create_dir_all(&doc).unwrap();
+    let secret = base.join("secret.png");
+    image::RgbImage::from_pixel(4, 4, image::Rgb([1, 2, 3])).save(&secret).unwrap();
+    image::RgbImage::from_pixel(4, 4, image::Rgb([200, 40, 40])).save(doc.join("ok.png")).unwrap();
+    std::fs::write(doc.join("fake.png"), "not a picture").unwrap();
+    std::os::unix::fs::symlink(&secret, doc.join("link.png")).unwrap();
+    assert!(std::process::Command::new("mkfifo").arg(doc.join("pipe.png")).status().unwrap().success());
+    let doc_real = doc.canonicalize().unwrap();
+    assert_eq!(crate::safefs::confine(&doc, "ok.png"), Some(doc_real.join("ok.png")));
+    for bad in ["../secret.png", "/etc/passwd", secret.to_str().unwrap(), "link.png", ""] {
+        assert_eq!(crate::safefs::confine(&doc, bad), None, "{bad}");
+    }
+    assert!(crate::attach::read_picture(&doc_real.join("fake.png"), crate::safefs::Links::Refuse).is_none());
+    assert!(crate::attach::read_picture(&doc_real.join("pipe.png"), crate::safefs::Links::Refuse).is_none(), "a pipe is never read");
+    // exports embed only pictures from the folder, and escape what goes in attributes
+    let quoted = "q\" onerror=\"x.png";
+    image::RgbImage::from_pixel(4, 4, image::Rgb([9, 9, 9])).save_with_format(doc.join(quoted), image::ImageFormat::Png).unwrap();
+    let text = format!("# T\n![](ok.png)\n![](../secret.png)\n![](pipe.png)\n![]({quoted})\n");
+    let html = crate::markdown::to_html("T", &text, Some(&doc));
+    assert_eq!(html.matches("data:image/png;base64,").count(), 2);
+    assert!(!html.contains("\" onerror=\""), "attribute not escaped");
+    assert!(html.contains("q&quot; onerror=&quot;x.png"));
+    let epub = crate::export::epub("T", &text, 1, &doc).unwrap();
+    // each picture's name appears twice in a zip (local header and directory)
+    assert_eq!(epub.windows(16).filter(|w| *w == b"OEBPS/images/img").count(), 4);
+    assert!(!epub.windows(10).any(|w| w == b"\" onerror="));
+}
+
+/// The Save panel's choice is kept as given: no extension is added, so no other file
+/// than the one the panel asked about is written.
+#[test]
+fn an_export_keeps_the_chosen_name() {
+    let dir = std::env::temp_dir().join(format!("gf-export-name-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let other = dir.join("notes.html");
+    std::fs::write(&other, "keep me").unwrap();
+    let lib = Library::sample();
+    let n = &lib.notes[0];
+    let p = crate::export::export_note_at(n, crate::export::Format::Html, &dir.join("notes"), &dir).unwrap();
+    assert_eq!(p, dir.join("notes"));
+    assert!(std::fs::read_to_string(&p).unwrap().contains("<html"));
+    assert_eq!(std::fs::read_to_string(&other).unwrap(), "keep me");
 }

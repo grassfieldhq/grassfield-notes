@@ -1,4 +1,5 @@
-//! A small built-in file chooser (no system dialog is needed).
+//! Choosing files: the system's Open panel (XDG desktop portal) when there is one, and a
+//! small built-in chooser otherwise.
 
 use crate::theme::Theme;
 use eframe::egui::{self, Align2, Color32, FontFamily, FontId, Sense, Stroke, Vec2};
@@ -18,8 +19,11 @@ pub enum Purpose {
 }
 
 pub struct FilePicker {
+    /// the built-in chooser is showing
     pub open: bool,
     pub purpose: Purpose,
+    /// the system's Open panel is showing
+    panel: Option<std::sync::mpsc::Receiver<crate::portal::Answer>>,
     dir: PathBuf,
     selected: BTreeSet<PathBuf>,
     exts: Vec<&'static str>,
@@ -30,6 +34,7 @@ impl Default for FilePicker {
     fn default() -> Self {
         Self {
             open: false,
+            panel: None,
             purpose: Purpose::Attach,
             dir: dirs::home_dir().unwrap_or_else(|| PathBuf::from("/")),
             selected: BTreeSet::new(),
@@ -40,8 +45,29 @@ impl Default for FilePicker {
 }
 
 impl FilePicker {
-    pub fn start(&mut self, purpose: Purpose) {
+    /// Ask for files: the system's Open panel when there is one, the built-in chooser otherwise.
+    pub fn start(&mut self, ctx: &egui::Context, purpose: Purpose) {
+        self.start_builtin(purpose);
+        if crate::portal::available() {
+            self.open = false;
+            let label = match purpose {
+                Purpose::Import | Purpose::OpenFile => crate::i18n::tr("Fichiers Markdown").to_string(),
+                _ => crate::i18n::tr("Images ou PDF").to_string(),
+            };
+            let ask = crate::portal::Ask::Open { multiple: purpose != Purpose::OpenFile, filter: (label, self.exts.clone()) };
+            self.panel = Some(crate::portal::ask(ctx, self.title().to_string(), ask, Some(self.dir.clone())));
+        }
+    }
+
+    /// The panel or the chooser is showing.
+    pub fn busy(&self) -> bool {
+        self.open || self.panel.is_some()
+    }
+
+    /// The built-in chooser only (screenshots, or when no system panel answers).
+    pub fn start_builtin(&mut self, purpose: Purpose) {
         self.open = true;
+        self.panel = None;
         self.purpose = purpose;
         self.selected.clear();
         self.error = None;
@@ -80,6 +106,25 @@ impl FilePicker {
 
     /// Draws the chooser over the window. Returns the chosen files once confirmed.
     pub fn show(&mut self, ctx: &egui::Context, t: &Theme) -> Option<Vec<PathBuf>> {
+        if let Some(rx) = &self.panel {
+            match rx.try_recv() {
+                Ok(crate::portal::Answer::Files(files)) => {
+                    self.panel = None;
+                    let files: Vec<PathBuf> = files.into_iter().filter(|p| self.accepts(p)).collect();
+                    return (!files.is_empty()).then_some(files);
+                }
+                Ok(crate::portal::Answer::Cancelled) => {
+                    self.panel = None;
+                    return None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => return None,
+                // no system panel answered: the built-in chooser takes over
+                Ok(crate::portal::Answer::Unavailable) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.panel = None;
+                    self.open = true;
+                }
+            }
+        }
         if !self.open {
             return None;
         }
