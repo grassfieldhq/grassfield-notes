@@ -323,6 +323,7 @@ fn note_ids_never_overflow_or_repeat() {
     assert!(a != u64::MAX && b != u64::MAX && a != b && a != 0 && b != 0);
 }
 
+#[cfg(unix)]
 fn git_in(dir: &std::path::Path, args: &[&str]) {
     let ok = std::process::Command::new("git")
         .current_dir(dir)
@@ -334,6 +335,7 @@ fn git_in(dir: &std::path::Path, args: &[&str]) {
     assert!(ok, "git {args:?}");
 }
 
+#[cfg(unix)]
 fn note_file(id: u64, attachments: &str, text: &str) -> String {
     format!("---\nid: {id}\ncreated: 1\nmodified: 9999999999\npinned: false\narchived: false\ntrashed: false\nattachments: {attachments}\n---\n{text}")
 }
@@ -458,6 +460,7 @@ fn links_already_in_the_local_copy_are_refused() {
     std::env::remove_var("GRASSFIELD_DATA");
 }
 
+#[cfg(unix)]
 fn safefs_is_real_dir(p: &std::path::Path) -> bool {
     std::fs::symlink_metadata(p).map(|m| m.is_dir()).unwrap_or(false)
 }

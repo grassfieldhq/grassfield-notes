@@ -208,6 +208,7 @@ fn ocr_lang() -> String {
 /// Text readers run at most this long per document.
 const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 /// Memory a text reader may use (address space).
+#[cfg(unix)]
 const READ_MEMORY: u64 = 1536 * 1024 * 1024;
 /// Most text kept from one document.
 const MAX_TEXT_BYTES: u64 = 4 * 1024 * 1024;

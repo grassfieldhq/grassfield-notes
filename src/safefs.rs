@@ -214,7 +214,8 @@ pub fn copy_regular(src: &Path, links: Links, dst: &Path, max: u64, mode: u32) -
 pub enum Saved {
     /// a new file renamed over the old one, with its mode, owner, group and attributes
     Replaced,
-    /// written into the existing file, after a backup of its old content
+    /// written into the existing file, after a backup of its old content (Unix only)
+    #[cfg_attr(not(unix), allow(dead_code))]
     InPlace,
 }
 

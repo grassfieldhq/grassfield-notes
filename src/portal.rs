@@ -7,6 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver};
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))] // the portal answers only on Linux
 pub enum Answer {
     Files(Vec<PathBuf>),
     Cancelled,
@@ -15,6 +16,7 @@ pub enum Answer {
 }
 
 /// What to ask for.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))] // read only by the Linux portal
 pub enum Ask {
     /// pick existing files, filtered by extension
     Open { multiple: bool, filter: (String, Vec<&'static str>) },
@@ -141,6 +143,7 @@ fn run(_: &str, _: Ask, _: Option<&Path>) -> Answer {
 }
 
 /// A local path from a `file://` URI (percent-decoded). Other URIs are refused.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))] // portal answers are Linux only
 pub fn file_uri_to_path(uri: &str) -> Option<PathBuf> {
     let rest = uri.strip_prefix("file://")?;
     // "file:///path" (empty host) or "file://localhost/path"
