@@ -458,7 +458,36 @@ impl GrassApp {
                     toggle_line_at = Some(Self::char_to_byte(&text, a));
                 }
             }
+            // Return on a list line continues the list (or ends it on an empty item); Shift+Return stays a plain new line.
+            // Only when Return is the frame's one edit: the caret is last frame's, so text typed in the same frame
+            // (fast typing) would land after the new marker; then Return stays plain for that frame.
+            let plain_return = ctx.input(|i| {
+                i.modifiers.is_none()
+                    && i.num_presses(Key::Enter) == 1
+                    && !i.events.iter().any(|e| matches!(e, egui::Event::Text(_) | egui::Event::Paste(_) | egui::Event::Ime(_)))
+            });
+            let caret = self.cursor.filter(|(a, b)| a == b).map(|(a, _)| a);
+            if let (true, Some(caret)) = (plain_return, caret) {
+                let edit = self.lib.get(id).and_then(|n| textedit::list_return(&n.text, caret));
+                if let Some(edit) = edit {
+                    ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
+                    if let Some(note) = self.lib.get_mut(id) {
+                        note.text.replace_range(edit.range, &edit.insert);
+                        note.modified = now();
+                    }
+                    let mut state = egui::text_edit::TextEditState::load(&ctx, editor_id).unwrap_or_default();
+                    let c = egui::text::CCursor::new(edit.caret);
+                    state.cursor.set_char_range(Some(egui::text::CCursorRange::one(c)));
+                    state.store(&ctx, editor_id);
+                    self.cursor = Some((edit.caret, edit.caret));
+                    self.mark_dirty(&ctx);
+                }
+            }
         }
+        // A picture pasted with Ctrl+V (an image and no text on the clipboard) goes into the note, as a dropped one.
+        let pasted_image = if ctx.memory(|m| m.has_focus(editor_id)) && !trashed { textedit::take_pasted_image(&ctx) } else { None };
+        // the selection before this frame, for a right-click that lands on it
+        let selection_before = textedit::saved_selection(&ctx, editor_id);
         let focus_editor = std::mem::take(&mut self.focus_editor);
         let mut new_cursor = None;
         let style_key = (
@@ -511,16 +540,27 @@ impl GrassApp {
                         ui.fonts_mut(|f| f.layout_job(job))
                     };
                     let min_h = (ui.available_height() - 40.0).max(200.0);
-                    let out = egui::TextEdit::multiline(&mut note.text)
-                        .id(editor_id)
-                        .frame(egui::Frame::NONE)
-                        .desired_width(w)
-                        .min_size(Vec2::new(w, min_h))
-                        .lock_focus(true)
-                        .interactive(!trashed)
-                        .hint_text(crate::i18n::tr("Commencez à écrire…"))
-                        .layouter(&mut layouter)
-                        .show(ui);
+                    let out = if trashed {
+                        // a note in the trash is read-only, but its text can still be selected and copied
+                        let mut ro: &str = note.text.as_str();
+                        egui::TextEdit::multiline(&mut ro)
+                            .id(editor_id)
+                            .frame(egui::Frame::NONE)
+                            .desired_width(w)
+                            .min_size(Vec2::new(w, min_h))
+                            .layouter(&mut layouter)
+                            .show(ui)
+                    } else {
+                        egui::TextEdit::multiline(&mut note.text)
+                            .id(editor_id)
+                            .frame(egui::Frame::NONE)
+                            .desired_width(w)
+                            .min_size(Vec2::new(w, min_h))
+                            .lock_focus(true)
+                            .hint_text(crate::i18n::tr("Commencez à écrire…"))
+                            .layouter(&mut layouter)
+                            .show(ui)
+                    };
                     let resp = out.response.response.clone();
                     if focus_editor {
                         resp.request_focus();
@@ -532,6 +572,10 @@ impl GrassApp {
                         let rr = r.as_sorted_char_range();
                         new_cursor = Some((rr.start.0, rr.end.0));
                     }
+                    if let Some(kept) = textedit::keep_selection_on_right_click(&ctx, editor_id, selection_before, &out) {
+                        new_cursor = Some(kept);
+                    }
+                    textedit::context_menu(&resp, editor_id, !trashed, new_cursor.or(selection_before), &note.text);
 
                     // Check boxes, quotes, rules and pictures drawn over the text.
                     let galley = out.galley.clone();
@@ -574,6 +618,9 @@ impl GrassApp {
             });
         if new_cursor.is_some() {
             self.cursor = new_cursor;
+        }
+        if let Some(image) = pasted_image {
+            self.paste_image(&ctx, id, &image);
         }
         if let Some((name, is_sketch)) = open_pic {
             self.actions.push(if is_sketch { Action::EditSketch(id, name) } else { Action::EditImage(id, name) });

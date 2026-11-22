@@ -133,4 +133,10 @@ pub const ROWS: &[[&str; 6]] = &[
     ["dim.", "Sun", "dom.", "So.", "dom", "dom."],
     ["%d/%m/%Y", "%b %-d, %Y", "%d/%m/%Y", "%d.%m.%Y", "%d/%m/%Y", "%d/%m/%Y"],
     ["%d/%m/%Y à %H:%M", "%b %-d, %Y at %H:%M", "%d/%m/%Y a las %H:%M", "%d.%m.%Y um %H:%M", "%d/%m/%Y alle %H:%M", "%d/%m/%Y às %H:%M"],
+    // text context menu and pasted pictures
+    ["Couper", "Cut", "Cortar", "Ausschneiden", "Taglia", "Cortar"],
+    ["Copier", "Copy", "Copiar", "Kopieren", "Copia", "Copiar"],
+    ["Coller", "Paste", "Pegar", "Einfügen", "Incolla", "Colar"],
+    ["Tout sélectionner", "Select All", "Seleccionar todo", "Alles auswählen", "Seleziona tutto", "Selecionar tudo"],
+    ["image", "image", "imagen", "bild", "immagine", "imagem"],
 ];

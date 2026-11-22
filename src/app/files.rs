@@ -833,6 +833,7 @@ impl GrassApp {
                         ui.fonts_mut(|fo| fo.layout_job(job))
                     };
                     let min_h = (ui.available_height() - 40.0).max(200.0);
+                    let selection_before = textedit::saved_selection(ui.ctx(), editor_id);
                     let out = if reading {
                         // selectable but not editable
                         let mut ro: &str = f.text.as_str();
@@ -858,6 +859,10 @@ impl GrassApp {
                     if resp.changed() {
                         edited = true;
                     }
+                    let selection = textedit::keep_selection_on_right_click(ui.ctx(), editor_id, selection_before, &out)
+                        .or_else(|| out.cursor_range.map(|r| r.as_sorted_char_range()).map(|r| (r.start.0, r.end.0)))
+                        .or(selection_before);
+                    textedit::context_menu(&resp, editor_id, !reading, selection, &f.text);
                     let galley = out.galley.clone();
                     let ov = overlay::paint(ui, &overlay::Input {
                         text: &f.text,

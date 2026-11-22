@@ -1,0 +1,480 @@
+//! What the note editor and the Markdown file view add to egui's text field so text editing behaves as in a native
+//! editor: the right-click menu (Cut, Copy, Paste, Select All), a right-click that keeps the selection it lands on, and
+//! pictures pasted from the clipboard.
+
+use super::*;
+use egui::text::{CCursor, CCursorRange};
+use egui::text_edit::TextEditState;
+
+/// The commands of the text context menu, in the order a native editor lists them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum EditCommand {
+    Cut,
+    Copy,
+    Paste,
+    SelectAll,
+}
+
+impl EditCommand {
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            EditCommand::Cut => crate::i18n::tr("Couper"),
+            EditCommand::Copy => crate::i18n::tr("Copier"),
+            EditCommand::Paste => crate::i18n::tr("Coller"),
+            EditCommand::SelectAll => crate::i18n::tr("Tout sélectionner"),
+        }
+    }
+
+    /// The shortcut shown next to the command (Ctrl here; Grassfield's Super+C/V/X/A send the same chords).
+    pub(super) fn shortcut(self) -> KeyboardShortcut {
+        let key = match self {
+            EditCommand::Cut => Key::X,
+            EditCommand::Copy => Key::C,
+            EditCommand::Paste => Key::V,
+            EditCommand::SelectAll => Key::A,
+        };
+        KeyboardShortcut::new(Modifiers::COMMAND, key)
+    }
+
+    /// The window command that makes eframe run the clipboard action on the focused text field, exactly as the
+    /// keyboard shortcut does (the system clipboard is read and written by egui-winit). Select All has none.
+    pub(super) fn viewport_command(self) -> Option<egui::ViewportCommand> {
+        match self {
+            EditCommand::Cut => Some(egui::ViewportCommand::RequestCut),
+            EditCommand::Copy => Some(egui::ViewportCommand::RequestCopy),
+            EditCommand::Paste => Some(egui::ViewportCommand::RequestPaste),
+            EditCommand::SelectAll => None,
+        }
+    }
+}
+
+/// The menu's commands and whether each one can run: Cut needs an editable field and a selection, Copy a selection,
+/// Paste an editable field, Select All some text. Disabled commands stay listed, as in a native menu.
+pub(super) fn menu_items(editable: bool, has_selection: bool, has_text: bool) -> [(EditCommand, bool); 4] {
+    [
+        (EditCommand::Cut, editable && has_selection),
+        (EditCommand::Copy, has_selection),
+        (EditCommand::Paste, editable),
+        (EditCommand::SelectAll, has_text),
+    ]
+}
+
+/// A right-click inside the selection keeps it (the menu then acts on it); anywhere else the caret moves there.
+/// `selection` is the sorted char range before the click, `at` the char index under the pointer.
+pub(super) fn right_click_keeps(selection: Option<(usize, usize)>, at: usize) -> bool {
+    matches!(selection, Some((a, b)) if a < b && (a..=b).contains(&at))
+}
+
+/// The sorted char range the field's saved state holds, if any.
+pub(super) fn saved_selection(ctx: &egui::Context, id: Id) -> Option<(usize, usize)> {
+    let range = TextEditState::load(ctx, id)?.cursor.char_range()?;
+    let sorted = range.as_sorted_char_range();
+    Some((sorted.start.0, sorted.end.0))
+}
+
+/// egui moves the caret on any pointer press, the secondary one too, which would drop the selection a right-click is
+/// meant to act on. Put it back when the press landed inside it. Returns the selection now in force.
+pub(super) fn keep_selection_on_right_click(
+    ctx: &egui::Context,
+    id: Id,
+    before: Option<(usize, usize)>,
+    out: &egui::text_edit::TextEditOutput,
+) -> Option<(usize, usize)> {
+    let pressed = ctx.input(|i| i.pointer.button_pressed(egui::PointerButton::Secondary));
+    if !pressed || !out.response.response.hovered() {
+        return None;
+    }
+    let pos = ctx.input(|i| i.pointer.interact_pos())?;
+    let at = out.galley.cursor_from_pos(pos - out.galley_pos).index.0;
+    if !right_click_keeps(before, at) {
+        return None;
+    }
+    let (a, b) = before?;
+    let mut state = TextEditState::load(ctx, id).unwrap_or_default();
+    state.cursor.set_char_range(Some(CCursorRange::two(CCursor::new(a), CCursor::new(b))));
+    state.store(ctx, id);
+    Some((a, b))
+}
+
+/// The right-click menu of a text field showing `text`; `selection` is the sorted char range.
+pub(super) fn context_menu(
+    resp: &egui::Response,
+    id: Id,
+    editable: bool,
+    selection: Option<(usize, usize)>,
+    text: &str,
+) {
+    resp.context_menu(|ui| {
+        ui.set_min_width(190.0);
+        let len = text.chars().count();
+        let has_selection = matches!(selection, Some((a, b)) if a < b);
+        for (i, (cmd, enabled)) in menu_items(editable, has_selection, len > 0).into_iter().enumerate() {
+            if i == 3 {
+                ui.separator();
+            }
+            let shortcut = ui.ctx().format_shortcut(&cmd.shortcut());
+            let button = egui::Button::new(cmd.label()).shortcut_text(shortcut);
+            if ui.add_enabled(enabled, button).clicked() {
+                run(ui.ctx(), id, cmd, len);
+                ui.close();
+            }
+        }
+    });
+}
+
+/// Run a menu command on the field `id`. Clicking the menu took the keyboard focus from the field; it gets it back
+/// first, so the cut, copy or paste that eframe delivers next frame reaches it, at its kept selection.
+pub(super) fn run(ctx: &egui::Context, id: Id, cmd: EditCommand, len: usize) {
+    ctx.memory_mut(|m| m.request_focus(id));
+    match cmd.viewport_command() {
+        Some(command) => ctx.send_viewport_cmd(command),
+        None => {
+            let mut state = TextEditState::load(ctx, id).unwrap_or_default();
+            state.cursor.set_char_range(Some(CCursorRange::two(CCursor::new(0), CCursor::new(len))));
+            state.store(ctx, id);
+        }
+    }
+    ctx.request_repaint();
+}
+
+/// The X11-era clipboard keys that GTK and Qt honour on Linux: Shift+Insert pastes, Ctrl+Insert copies, Shift+Delete
+/// cuts. egui-winit maps them on Windows only, and Grassfield's Emoji & Symbols panel (through Omarchy's
+/// omarchy-menu-emoji-insert) inserts its glyph with Shift+Insert, so without this nothing arrived in Notes.
+pub(super) fn legacy_clipboard_command(key: Key, m: Modifiers) -> Option<EditCommand> {
+    if cfg!(target_os = "windows") || m.alt {
+        return None;
+    }
+    match key {
+        Key::Insert if m.shift && !m.command => Some(EditCommand::Paste),
+        Key::Insert if m.command && !m.shift => Some(EditCommand::Copy),
+        Key::Delete if m.shift && !m.command => Some(EditCommand::Cut),
+        _ => None,
+    }
+}
+
+/// Turn this frame's legacy clipboard keys into the clipboard actions of the focused text field (run once per frame,
+/// before any widget). The key is taken out, so Shift+Delete never also deletes a character.
+pub(super) fn legacy_clipboard_keys(ctx: &egui::Context) {
+    if ctx.memory(|m| m.focused().is_none()) {
+        return;
+    }
+    let mut commands = Vec::new();
+    ctx.input_mut(|i| {
+        i.events.retain(|e| match e {
+            egui::Event::Key { key, pressed, modifiers, .. } => match legacy_clipboard_command(*key, *modifiers) {
+                Some(cmd) => {
+                    if *pressed {
+                        commands.push(cmd);
+                    }
+                    false
+                }
+                None => true,
+            },
+            _ => true,
+        })
+    });
+    for cmd in commands {
+        if let Some(command) = cmd.viewport_command() {
+            ctx.send_viewport_cmd(command);
+        }
+    }
+}
+
+/// What Return does on a list line, as in Apple Notes or Bear: the new line gets the same marker and indent ("- ",
+/// "* ", "+ ", a to-do as "- [ ] " even after a checked one, "3. " after "2. ", "> "); Return on an item with nothing
+/// in it ends the list (the marker goes). `caret` is a char index with no selection. None: an ordinary Return.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct ListReturn {
+    /// byte range of `text` replaced by `insert`
+    pub range: std::ops::Range<usize>,
+    pub insert: String,
+    /// the caret afterwards, as a char index
+    pub caret: usize,
+}
+
+/// (indent, marker as written, marker for the next line) of a list line.
+fn list_marker(line: &str) -> Option<(&str, &str, String)> {
+    let indent_len = line.len() - line.trim_start_matches([' ', '\t']).len();
+    let (indent, rest) = line.split_at(indent_len);
+    for todo in ["- [ ] ", "- [x] ", "- [X] ", "* [ ] ", "* [x] ", "* [X] "] {
+        if rest.starts_with(todo) {
+            return Some((indent, &rest[..todo.len()], format!("{}[ ] ", &todo[..2])));
+        }
+    }
+    for bullet in ["- ", "* ", "+ ", "> "] {
+        if rest.starts_with(bullet) {
+            return Some((indent, &rest[..bullet.len()], bullet.to_string()));
+        }
+    }
+    let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    if (1..=9).contains(&digits) {
+        let after = &rest[digits..];
+        for delim in [". ", ") "] {
+            if after.starts_with(delim) {
+                let n: u64 = rest[..digits].parse().ok()?;
+                return Some((indent, &rest[..digits + 2], format!("{}{}", n + 1, delim)));
+            }
+        }
+    }
+    None
+}
+
+pub(super) fn list_return(text: &str, caret: usize) -> Option<ListReturn> {
+    let at = text.char_indices().nth(caret).map(|(b, _)| b).unwrap_or(text.len());
+    let start = text[..at].rfind('\n').map(|x| x + 1).unwrap_or(0);
+    let end = text[at..].find('\n').map(|x| at + x).unwrap_or(text.len());
+    // inside a code block Return is just Return
+    let fences = text[..start].lines().filter(|l| l.trim_start().starts_with("```")).count();
+    if fences % 2 == 1 {
+        return None;
+    }
+    let line = &text[start..end];
+    let (indent, marker, next) = list_marker(line)?;
+    let body_at = start + indent.len() + marker.len();
+    if at < body_at {
+        return None;
+    }
+    if text[body_at..end].trim().is_empty() {
+        // an empty item: Return ends the list
+        let caret = text[..start].chars().count();
+        return Some(ListReturn { range: start..end, insert: String::new(), caret });
+    }
+    let insert = format!("\n{indent}{next}");
+    let caret = caret + insert.chars().count();
+    Some(ListReturn { range: at..at, insert, caret })
+}
+
+/// A picture pasted from the clipboard (Ctrl+V with an image and no text on it), taken out of this frame's input so
+/// no other field sees it.
+pub(super) fn take_pasted_image(ctx: &egui::Context) -> Option<Arc<egui::ColorImage>> {
+    ctx.input_mut(|i| {
+        let at = i.events.iter().position(|e| matches!(e, egui::Event::PasteImage(_)))?;
+        match i.events.remove(at) {
+            egui::Event::PasteImage(image) => Some(image),
+            _ => None,
+        }
+    })
+}
+
+/// The pasted picture as PNG bytes.
+pub(super) fn encode_png(image: &egui::ColorImage) -> Result<Vec<u8>, String> {
+    let [w, h] = image.size;
+    let rgba: Vec<u8> = image.pixels.iter().flat_map(|c| c.to_srgba_unmultiplied()).collect();
+    let buf = image::RgbaImage::from_raw(w as u32, h as u32, rgba).ok_or_else(|| "bad picture size".to_string())?;
+    let mut out = std::io::Cursor::new(Vec::new());
+    buf.write_to(&mut out, image::ImageFormat::Png).map_err(|e| e.to_string())?;
+    Ok(out.into_inner())
+}
+
+/// A file name for a pasted picture that nothing in `dir` uses yet: `image-20261122-103000.png`, then `… 2.png`.
+pub(super) fn free_name(dir: &std::path::Path, stem: &str) -> String {
+    let mut name = format!("{stem}.png");
+    let mut k = 2;
+    while std::fs::symlink_metadata(dir.join(&name)).is_ok() {
+        name = format!("{stem} {k}.png");
+        k += 1;
+    }
+    name
+}
+
+impl GrassApp {
+    /// Store a pasted picture as an attachment of the note and show it inline at the cursor, as a dropped one.
+    pub(super) fn paste_image(&mut self, ctx: &egui::Context, id: u64, image: &egui::ColorImage) {
+        let dir = Library::attachment_dir(id);
+        let stem = format!("{}-{}", crate::i18n::tr("image"), chrono::Local::now().format("%Y%m%d-%H%M%S"));
+        let saved =
+            encode_png(image).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e)).and_then(|png| {
+                std::fs::create_dir_all(&dir)?;
+                let name = free_name(&dir, &stem);
+                crate::safefs::write_new(&dir.join(&name), &png, 0o600)?;
+                Ok(name)
+            });
+        match saved {
+            Ok(name) => {
+                if let Some(n) = self.lib.get_mut(id) {
+                    // read = false: the text in the picture is read in the background, so search finds it
+                    n.attachments.push(model::Attachment { name: name.clone(), text: String::new(), read: false });
+                    n.modified = now();
+                }
+                self.insert_image_ref(id, &name);
+                self.layout_cache = None;
+                self.mark_dirty(ctx);
+            }
+            Err(e) => self
+                .notify(ctx, crate::i18n::trf("Image non enregistrée : {e}", &[("e", &e as &dyn std::fmt::Display)])),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn menu_lists_the_four_commands_in_native_order() {
+        let cmds: Vec<EditCommand> = menu_items(true, true, true).iter().map(|(c, _)| *c).collect();
+        assert_eq!(cmds, vec![EditCommand::Cut, EditCommand::Copy, EditCommand::Paste, EditCommand::SelectAll]);
+        assert!(menu_items(true, true, true).iter().all(|(_, on)| *on));
+    }
+
+    #[test]
+    fn menu_enables_only_what_can_run() {
+        // no selection: nothing to cut or copy, paste and select all still work
+        assert_eq!(
+            menu_items(true, false, true),
+            [
+                (EditCommand::Cut, false),
+                (EditCommand::Copy, false),
+                (EditCommand::Paste, true),
+                (EditCommand::SelectAll, true)
+            ]
+        );
+        // read-only (reading mode, a note in the trash): copy and select all only
+        assert_eq!(
+            menu_items(false, true, true),
+            [
+                (EditCommand::Cut, false),
+                (EditCommand::Copy, true),
+                (EditCommand::Paste, false),
+                (EditCommand::SelectAll, true)
+            ]
+        );
+        // empty note: paste only
+        assert_eq!(
+            menu_items(true, false, false),
+            [
+                (EditCommand::Cut, false),
+                (EditCommand::Copy, false),
+                (EditCommand::Paste, true),
+                (EditCommand::SelectAll, false)
+            ]
+        );
+    }
+
+    #[test]
+    fn clipboard_commands_go_through_eframe_and_use_the_platform_shortcuts() {
+        assert_eq!(EditCommand::Cut.viewport_command(), Some(egui::ViewportCommand::RequestCut));
+        assert_eq!(EditCommand::Copy.viewport_command(), Some(egui::ViewportCommand::RequestCopy));
+        assert_eq!(EditCommand::Paste.viewport_command(), Some(egui::ViewportCommand::RequestPaste));
+        assert_eq!(EditCommand::SelectAll.viewport_command(), None);
+        let keys: Vec<Key> = [EditCommand::Cut, EditCommand::Copy, EditCommand::Paste, EditCommand::SelectAll]
+            .iter()
+            .map(|c| c.shortcut().logical_key)
+            .collect();
+        assert_eq!(keys, vec![Key::X, Key::C, Key::V, Key::A]);
+        assert!([EditCommand::Cut, EditCommand::Copy, EditCommand::Paste, EditCommand::SelectAll]
+            .iter()
+            .all(|c| c.shortcut().modifiers == Modifiers::COMMAND));
+    }
+
+    #[test]
+    fn right_click_keeps_the_selection_it_lands_on() {
+        assert!(right_click_keeps(Some((4, 9)), 4));
+        assert!(right_click_keeps(Some((4, 9)), 6));
+        assert!(right_click_keeps(Some((4, 9)), 9));
+        assert!(!right_click_keeps(Some((4, 9)), 10));
+        assert!(!right_click_keeps(Some((4, 9)), 3));
+        // a bare caret is not a selection: the caret moves to the click
+        assert!(!right_click_keeps(Some((5, 5)), 5));
+        assert!(!right_click_keeps(None, 0));
+    }
+
+    #[test]
+    fn the_app_never_takes_the_clipboard_or_editing_chords() {
+        // Ctrl+C/X/V become clipboard events in egui-winit only while nothing consumes them, and Ctrl+A/Z/Y reach
+        // the text field as keys: no shortcut of the app may use them (src/app.rs, editor.rs, files.rs, sketcher.rs
+        // take N, F, I, P, Delete, Comma, O, E, B, Shift+X, Shift+H, K, Enter, S, W; Z only in the sketcher).
+        for src in [include_str!("../app.rs"), include_str!("editor.rs"), include_str!("files.rs")] {
+            for key in ["Key::C)", "Key::V)", "Key::X)", "Key::A)", "Key::Z)", "Key::Y)"] {
+                for line in src.lines().filter(|l| l.contains("consume_shortcut") || l.contains("consume_key")) {
+                    let plain_cmd = line.contains("KeyboardShortcut::new(Modifiers::COMMAND, ")
+                        || line.contains("KeyboardShortcut::new(cmd, ");
+                    assert!(!(plain_cmd && line.contains(key)), "{key} is taken by the app: {line}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_clipboard_keys_map_as_in_gtk_and_qt() {
+        let shift = Modifiers::SHIFT;
+        let ctrl = Modifiers::COMMAND;
+        assert_eq!(legacy_clipboard_command(Key::Insert, shift), Some(EditCommand::Paste));
+        assert_eq!(legacy_clipboard_command(Key::Insert, ctrl), Some(EditCommand::Copy));
+        assert_eq!(legacy_clipboard_command(Key::Delete, shift), Some(EditCommand::Cut));
+        // plain Delete and Insert, and other chords, stay keys
+        assert_eq!(legacy_clipboard_command(Key::Delete, Modifiers::NONE), None);
+        assert_eq!(legacy_clipboard_command(Key::Delete, ctrl), None);
+        assert_eq!(legacy_clipboard_command(Key::Insert, Modifiers::NONE), None);
+        assert_eq!(legacy_clipboard_command(Key::Insert, ctrl | shift), None);
+        assert_eq!(legacy_clipboard_command(Key::Insert, shift | Modifiers::ALT), None);
+        assert_eq!(legacy_clipboard_command(Key::V, ctrl), None);
+    }
+
+    fn apply(text: &str, caret: usize) -> Option<(String, usize)> {
+        let e = list_return(text, caret)?;
+        let mut t = text.to_string();
+        t.replace_range(e.range, &e.insert);
+        Some((t, e.caret))
+    }
+
+    #[test]
+    fn return_continues_bullets_todos_numbers_and_quotes() {
+        assert_eq!(apply("- un", 4), Some(("- un\n- ".into(), 7)));
+        assert_eq!(apply("* un", 4), Some(("* un\n* ".into(), 7)));
+        assert_eq!(apply("  - deux", 8), Some(("  - deux\n  - ".into(), 13)));
+        assert_eq!(apply("- [x] fait", 10), Some(("- [x] fait\n- [ ] ".into(), 17)));
+        assert_eq!(apply("- [ ] à faire", 13), Some(("- [ ] à faire\n- [ ] ".into(), 20)));
+        assert_eq!(apply("9. neuf", 7), Some(("9. neuf\n10. ".into(), 12)));
+        assert_eq!(apply("1) un", 5), Some(("1) un\n2) ".into(), 9)));
+        assert_eq!(apply("> cité", 6), Some(("> cité\n> ".into(), 9)));
+        // in the middle of an item, the rest moves to the new item
+        assert_eq!(apply("- abcd", 4), Some(("- ab\n- cd".into(), 7)));
+    }
+
+    #[test]
+    fn return_on_an_empty_item_ends_the_list() {
+        assert_eq!(apply("- un\n- ", 7), Some(("- un\n".into(), 5)));
+        assert_eq!(apply("- un\n- [ ] ", 11), Some(("- un\n".into(), 5)));
+        assert_eq!(apply("1. un\n2. ", 9), Some(("1. un\n".into(), 6)));
+    }
+
+    #[test]
+    fn return_is_plain_elsewhere() {
+        assert_eq!(list_return("du texte", 8), None);
+        assert_eq!(list_return("-pas une liste", 14), None);
+        assert_eq!(list_return("1234567890. trop long", 21), None);
+        // caret inside the marker
+        assert_eq!(list_return("- un", 1), None);
+        // inside a code block
+        assert_eq!(list_return("```\n- pas une liste", 18), None);
+        assert!(list_return("```\ncode\n```\n- liste", 21).is_some());
+    }
+
+    #[test]
+    fn a_pasted_picture_becomes_a_png() {
+        let image = egui::ColorImage::new([3, 2], vec![egui::Color32::from_rgb(200, 10, 30); 6]);
+        let png = encode_png(&image).unwrap();
+        assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+        let back = image::load_from_memory(&png).unwrap().to_rgba8();
+        assert_eq!((back.width(), back.height()), (3, 2));
+        assert_eq!(back.get_pixel(1, 1).0, [200, 10, 30, 255]);
+    }
+
+    #[test]
+    fn pasted_pictures_never_overwrite_one_another() {
+        let dir = std::env::temp_dir().join(format!("gf-notes-paste-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(free_name(&dir, "image-1"), "image-1.png");
+        std::fs::write(dir.join("image-1.png"), b"x").unwrap();
+        assert_eq!(free_name(&dir, "image-1"), "image-1 2.png");
+        #[cfg(unix)]
+        {
+            // a dangling link at the name counts as taken
+            std::os::unix::fs::symlink(dir.join("nowhere"), dir.join("image-1 2.png")).unwrap();
+            assert_eq!(free_name(&dir, "image-1"), "image-1 3.png");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

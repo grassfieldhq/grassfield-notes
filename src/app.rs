@@ -10,6 +10,7 @@ mod panels;
 mod settings;
 mod sidebar;
 mod sketcher;
+mod textedit;
 
 use crate::markdown::{self, MdStyle};
 use crate::model::{
@@ -907,6 +908,8 @@ impl GrassApp {
     // ------------------------------------------------------------------ shortcuts
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
+        // Shift+Insert, Ctrl+Insert and Shift+Delete: the clipboard keys GTK and Qt honour (and the Emoji panel sends)
+        textedit::legacy_clipboard_keys(ctx);
         let cmd = Modifiers::COMMAND;
         let cmd_shift = Modifiers::COMMAND | Modifiers::SHIFT;
         let mut new = false;
