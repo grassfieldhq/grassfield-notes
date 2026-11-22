@@ -339,9 +339,7 @@ pub fn from_file(s: &str) -> Option<Note> {
 fn repo_file(root: &Path, dir: &Path, parts: &[&str]) -> Option<PathBuf> {
     let mut p = dir.to_path_buf();
     for (i, part) in parts.iter().enumerate() {
-        if safe_file_name(part).is_none() {
-            return None;
-        }
+        safe_file_name(part)?;
         p.push(part);
         let meta = std::fs::symlink_metadata(&p).ok()?;
         let last = i + 1 == parts.len();

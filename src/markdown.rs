@@ -372,19 +372,17 @@ fn floor_boundary(s: &str, max: usize) -> usize {
 /// The inline styling of each line, kept from one layout to the next: while typing, only
 /// the line that changed is styled again, so a keystroke never restyles the whole text.
 /// (It holds styling runs, not formats, so a change of theme or size needs no reset.)
+/// Runs of equal inline flags in one line: (start, end, flags), shared between layouts.
+type Runs = std::rc::Rc<Vec<(usize, usize, Flags)>>;
+
 #[derive(Default)]
 pub struct LineCache {
-    lines: HashMap<u64, std::rc::Rc<Vec<(usize, usize, Flags)>>>,
+    lines: HashMap<u64, Runs>,
 }
 
 impl LineCache {
     /// Runs of equal inline flags for one line's content, from the cache when possible.
-    fn runs(
-        &self,
-        next: &mut HashMap<u64, std::rc::Rc<Vec<(usize, usize, Flags)>>>,
-        content: &str,
-        base: Flags,
-    ) -> std::rc::Rc<Vec<(usize, usize, Flags)>> {
+    fn runs(&self, next: &mut HashMap<u64, Runs>, content: &str, base: Flags) -> Runs {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         content.hash(&mut h);
