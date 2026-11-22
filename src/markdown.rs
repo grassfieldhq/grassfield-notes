@@ -750,7 +750,12 @@ mod tests {
         let warm = layout_job_cached(&text, &st, 600.0, &mut cache);
         let warm_t = t.elapsed();
         eprintln!("~512 KiB of hostile lines: first styling {cold_t:?}, keystroke {warm_t:?}");
-        assert!(warm_t < std::time::Duration::from_millis(150), "a keystroke took {warm_t:?}");
+        // Fast in absolute terms, or at least far cheaper than styling everything: on a loaded CI runner (or with
+        // the other tests running in parallel) both timings stretch, the ratio stays.
+        assert!(
+            warm_t < std::time::Duration::from_millis(150) || warm_t * 4 < cold_t,
+            "a keystroke took {warm_t:?} (first styling {cold_t:?})"
+        );
         assert!(cold.sections.len() > 1000);
         // the same result as styling from scratch
         let fresh = layout_job(&text, &st, 600.0);
