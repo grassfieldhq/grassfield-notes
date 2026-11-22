@@ -22,6 +22,8 @@ pub fn is_attachable(p: &Path) -> bool {
 
 /// Largest picture or document read, attached or embedded in an export.
 pub const MAX_PICTURE_BYTES: u64 = 64 * 1024 * 1024;
+/// Largest width or height of a picture that is decoded or stored.
+pub const MAX_PICTURE_SIDE: u32 = 20_000;
 
 /// What a file really is, from its first bytes (its name may say anything).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -124,8 +126,8 @@ pub fn read_picture(path: &Path, links: crate::safefs::Links) -> Option<(Vec<u8>
 /// Decode a picture with bounded dimensions and memory (no decompression bombs).
 pub fn decode_picture(bytes: &[u8]) -> Option<image::DynamicImage> {
     let mut limits = image::Limits::default();
-    limits.max_image_width = Some(20_000);
-    limits.max_image_height = Some(20_000);
+    limits.max_image_width = Some(MAX_PICTURE_SIDE);
+    limits.max_image_height = Some(MAX_PICTURE_SIDE);
     limits.max_alloc = Some(512 * 1024 * 1024);
     let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().ok()?;
     reader.limits(limits);

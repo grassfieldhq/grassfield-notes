@@ -139,4 +139,5 @@ pub const ROWS: &[[&str; 6]] = &[
     ["Coller", "Paste", "Pegar", "Einfügen", "Incolla", "Colar"],
     ["Tout sélectionner", "Select All", "Seleccionar todo", "Alles auswählen", "Seleziona tutto", "Selecionar tudo"],
     ["image", "image", "imagen", "bild", "immagine", "imagem"],
+    ["Image trop grande pour être collée (20 000 px de côté et 64 Mo au plus)", "Picture too large to paste (20,000 px per side and 64 MB at most)", "Imagen demasiado grande para pegarla (20 000 px por lado y 64 MB como máximo)", "Bild zu groß zum Einfügen (höchstens 20.000 px pro Seite und 64 MB)", "Immagine troppo grande da incollare (al massimo 20.000 px per lato e 64 MB)", "Imagem demasiado grande para colar (no máximo 20 000 px por lado e 64 MB)"],
 ];

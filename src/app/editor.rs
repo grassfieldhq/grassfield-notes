@@ -464,7 +464,10 @@ impl GrassApp {
             let plain_return = ctx.input(|i| {
                 i.modifiers.is_none()
                     && i.num_presses(Key::Enter) == 1
-                    && !i.events.iter().any(|e| matches!(e, egui::Event::Text(_) | egui::Event::Paste(_) | egui::Event::Ime(_)))
+                    && !i
+                        .events
+                        .iter()
+                        .any(|e| matches!(e, egui::Event::Text(_) | egui::Event::Paste(_) | egui::Event::Ime(_)))
             });
             let caret = self.cursor.filter(|(a, b)| a == b).map(|(a, _)| a);
             if let (true, Some(caret)) = (plain_return, caret) {
@@ -485,7 +488,8 @@ impl GrassApp {
             }
         }
         // A picture pasted with Ctrl+V (an image and no text on the clipboard) goes into the note, as a dropped one.
-        let pasted_image = if ctx.memory(|m| m.has_focus(editor_id)) && !trashed { textedit::take_pasted_image(&ctx) } else { None };
+        let pasted_image =
+            if ctx.memory(|m| m.has_focus(editor_id)) && !trashed { textedit::take_pasted_image(&ctx) } else { None };
         // the selection before this frame, for a right-click that lands on it
         let selection_before = textedit::saved_selection(&ctx, editor_id);
         let focus_editor = std::mem::take(&mut self.focus_editor);
