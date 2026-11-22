@@ -233,7 +233,10 @@ fn git_command(dir: &Path, args: &[&str], auth: &Auth) -> std::process::Command 
 
 /// A clearer message for an SSH server whose key is not known yet.
 fn explain(err: &str, url: &str) -> String {
-    if err.contains("Host key verification failed") || err.contains("No ED25519 host key is known") || err.contains("host key is known") {
+    if err.contains("Host key verification failed")
+        || err.contains("No ED25519 host key is known")
+        || err.contains("host key is known")
+    {
         let host = url.split('@').nth(1).and_then(|h| h.split([':', '/']).next()).unwrap_or("github.com");
         return crate::i18n::trf(
             "La clé du serveur {host} n'est pas encore connue de cet ordinateur. Ouvrez un terminal, lancez « ssh -T git@{host} », vérifiez que l'empreinte affichée est celle publiée par le service, répondez « yes », puis synchronisez de nouveau.",
@@ -252,9 +255,9 @@ const FILE_MODE: u32 = 0o600;
 
 fn git(dir: &Path, args: &[&str], auth: &Auth) -> Result<String, String> {
     let token = auth.token.as_str();
-    let out = git_command(dir, args, auth)
-        .output()
-        .map_err(|e| crate::i18n::trf("git est introuvable sur cet ordinateur ({e})", &[("e", &e as &dyn std::fmt::Display)]))?;
+    let out = git_command(dir, args, auth).output().map_err(|e| {
+        crate::i18n::trf("git est introuvable sur cet ordinateur ({e})", &[("e", &e as &dyn std::fmt::Display)])
+    })?;
     let hide = |s: String| if token.is_empty() { s } else { s.replace(token, "•••") };
     let stdout = hide(String::from_utf8_lossy(&out.stdout).to_string());
     let stderr = hide(String::from_utf8_lossy(&out.stderr).to_string());
@@ -266,10 +269,7 @@ fn git(dir: &Path, args: &[&str], auth: &Auth) -> Result<String, String> {
 }
 
 fn slug(title: &str) -> String {
-    let s: String = title
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
-        .collect();
+    let s: String = title.chars().map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '-' }).collect();
     let s = s.split('-').filter(|p| !p.is_empty()).collect::<Vec<_>>().join("-");
     s.chars().take(48).collect()
 }
@@ -316,10 +316,7 @@ pub fn from_file(s: &str) -> Option<Note> {
     }
     let num = |k: &str| map.get(k).and_then(|v| v.parse::<i64>().ok());
     let flag = |k: &str| map.get(k).map(|v| v == "true").unwrap_or(false);
-    let names: Vec<String> = map
-        .get("attachments")
-        .and_then(|v| serde_json::from_str(v).ok())
-        .unwrap_or_default();
+    let names: Vec<String> = map.get("attachments").and_then(|v| serde_json::from_str(v).ok()).unwrap_or_default();
     Some(Note {
         id: map.get("id")?.parse().ok()?,
         created: num("created").unwrap_or(0),
@@ -420,7 +417,13 @@ pub(crate) fn write_repo(dir: &Path, final_notes: &[Note]) -> std::io::Result<()
             let _ = safefs::copy_regular(&src, Links::Refuse, &dst_dir.join(&name), MAX_ATTACHMENT_BYTES, FILE_MODE);
             let side = crate::sketch::sidecar(&src);
             if safefs::open_regular(&side, Links::Refuse).is_ok() {
-                let _ = safefs::copy_regular(&side, Links::Refuse, &crate::sketch::sidecar(&dst_dir.join(&name)), MAX_ATTACHMENT_BYTES, FILE_MODE);
+                let _ = safefs::copy_regular(
+                    &side,
+                    Links::Refuse,
+                    &crate::sketch::sidecar(&dst_dir.join(&name)),
+                    MAX_ATTACHMENT_BYTES,
+                    FILE_MODE,
+                );
             }
         }
     }
@@ -493,7 +496,12 @@ pub(crate) fn run(settings: SyncSettings, notes: Vec<Note>, synced: BTreeSet<u64
                 token = t.unwrap_or_default().trim().to_string();
                 loaded = Some(token.clone());
             }
-            Err(e) => return fail(crate::i18n::trf("Le jeton n'a pas pu être lu dans le trousseau du système : {e}", &[("e", &e)])),
+            Err(e) => {
+                return fail(crate::i18n::trf(
+                    "Le jeton n'a pas pu être lu dans le trousseau du système : {e}",
+                    &[("e", &e)],
+                ))
+            }
         }
     }
     let url = settings.repo_url.trim().to_string();
@@ -512,13 +520,17 @@ pub(crate) fn run(settings: SyncSettings, notes: Vec<Note>, synced: BTreeSet<u64
             ))
         }
     };
-    let branch = if settings.branch.trim().is_empty() { "main".to_string() } else { settings.branch.trim().to_string() };
+    let branch =
+        if settings.branch.trim().is_empty() { "main".to_string() } else { settings.branch.trim().to_string() };
     if !safe_branch(&branch) {
         return fail(crate::i18n::trf("Nom de branche invalide : {0}", &[("0", &branch)]));
     }
     let dir = repo_dir();
     if let Err(e) = std::fs::create_dir_all(&dir) {
-        return fail(crate::i18n::trf("Dossier de synchronisation impossible à créer : {e}", &[("e", &e as &dyn std::fmt::Display)]));
+        return fail(crate::i18n::trf(
+            "Dossier de synchronisation impossible à créer : {e}",
+            &[("e", &e as &dyn std::fmt::Display)],
+        ));
     }
     if !dir.join(".git").exists() {
         if let Err(e) = git(&dir, &["init", "-q"], &auth) {
@@ -536,7 +548,10 @@ pub(crate) fn run(settings: SyncSettings, notes: Vec<Note>, synced: BTreeSet<u64
     let remote_exists = match git(&dir, &["fetch", "-q", "--", &url, &branch], &auth) {
         Ok(_) => {
             if let Err(e) = git(&dir, &["checkout", "-q", "-B", &branch, "FETCH_HEAD"], &auth) {
-                return fail(crate::i18n::trf("Lecture du dépôt impossible : {e}", &[("e", &e as &dyn std::fmt::Display)]));
+                return fail(crate::i18n::trf(
+                    "Lecture du dépôt impossible : {e}",
+                    &[("e", &e as &dyn std::fmt::Display)],
+                ));
             }
             let _ = git(&dir, &["reset", "-q", "--hard", "FETCH_HEAD"], &auth);
             true
@@ -545,7 +560,12 @@ pub(crate) fn run(settings: SyncSettings, notes: Vec<Note>, synced: BTreeSet<u64
             let _ = git(&dir, &["checkout", "-q", "-B", &branch], &auth);
             false // empty repository: first push
         }
-        Err(e) => return fail(crate::i18n::trf("Connexion au dépôt impossible : {0}", &[("0", &explain(&e, &url) as &dyn std::fmt::Display)])),
+        Err(e) => {
+            return fail(crate::i18n::trf(
+                "Connexion au dépôt impossible : {0}",
+                &[("0", &explain(&e, &url) as &dyn std::fmt::Display)],
+            ))
+        }
     };
     let remote = read_remote(&dir);
     let (upserts, deletes, final_notes) = merge(&notes, &remote, &synced, remote_exists, settings.last_sync);
@@ -561,7 +581,10 @@ pub(crate) fn run(settings: SyncSettings, notes: Vec<Note>, synced: BTreeSet<u64
     }
     let changed = git(&dir, &["status", "--porcelain"], &auth).map(|s| !s.trim().is_empty()).unwrap_or(true);
     if changed {
-        let msg = crate::i18n::trf("Synchronisation Grassfield Notes — {0}", &[("0", &chrono::Local::now().format("%d/%m/%Y %H:%M") as &dyn std::fmt::Display)]);
+        let msg = crate::i18n::trf(
+            "Synchronisation Grassfield Notes — {0}",
+            &[("0", &chrono::Local::now().format("%d/%m/%Y %H:%M") as &dyn std::fmt::Display)],
+        );
         if let Err(e) = git(&dir, &["commit", "-q", "-m", &msg], &auth) {
             return fail(crate::i18n::trf("git commit a échoué : {e}", &[("e", &e as &dyn std::fmt::Display)]));
         }
@@ -569,7 +592,10 @@ pub(crate) fn run(settings: SyncSettings, notes: Vec<Note>, synced: BTreeSet<u64
     if changed || !remote_exists {
         let refspec = format!("HEAD:refs/heads/{branch}");
         if let Err(e) = git(&dir, &["push", "-q", "--", &url, &refspec], &auth) {
-            return fail(crate::i18n::trf("Envoi vers GitHub impossible : {0}", &[("0", &explain(&e, &url) as &dyn std::fmt::Display)]));
+            return fail(crate::i18n::trf(
+                "Envoi vers GitHub impossible : {0}",
+                &[("0", &explain(&e, &url) as &dyn std::fmt::Display)],
+            ));
         }
     }
     let base_modified = notes.iter().map(|n| (n.id, n.modified)).collect();
@@ -642,7 +668,10 @@ mod tests {
         let dir = std::env::temp_dir();
         let _guard = crate::tests::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // (where the runtime directory is not writable, the private data folder is used)
-        std::env::set_var("GRASSFIELD_DATA", std::env::temp_dir().join(format!("gf-askpass-{}", std::process::id())).join("library.json"));
+        std::env::set_var(
+            "GRASSFIELD_DATA",
+            std::env::temp_dir().join(format!("gf-askpass-{}", std::process::id())).join("library.json"),
+        );
         let file = TokenFile::create("ghp_SECRET").unwrap();
         let path = file.path.clone();
         assert_eq!(token_from_file(&path), "ghp_SECRET");
@@ -654,7 +683,10 @@ mod tests {
         }
         let auth = Auth { token: "ghp_SECRET".into(), host: "github.com".into(), file: Some(file) };
         let cmd = git_command(&dir, &["fetch", "-q", "--", "https://github.com/a/b.git", "main"], &auth);
-        let envs: Vec<_> = cmd.get_envs().map(|(k, v)| (k.to_string_lossy().to_string(), v.map(|v| v.to_string_lossy().to_string()))).collect();
+        let envs: Vec<_> = cmd
+            .get_envs()
+            .map(|(k, v)| (k.to_string_lossy().to_string(), v.map(|v| v.to_string_lossy().to_string())))
+            .collect();
         // the token is in neither the arguments nor the environment of git
         for a in cmd.get_args() {
             assert!(!a.to_string_lossy().contains("ghp_SECRET"), "token in argv: {a:?}");
@@ -670,7 +702,10 @@ mod tests {
         // local steps never get a way to the token
         for step in ["init", "config", "checkout", "reset", "add", "status", "commit"] {
             let local = git_command(&dir, &[step], &auth);
-            assert!(!local.get_envs().any(|(k, v)| k == "GIT_ASKPASS" || (k == TOKEN_FILE_ENV && v.is_some())), "{step}");
+            assert!(
+                !local.get_envs().any(|(k, v)| k == "GIT_ASKPASS" || (k == TOKEN_FILE_ENV && v.is_some())),
+                "{step}"
+            );
         }
         // the file is gone when the sync ends
         drop(auth);
@@ -684,11 +719,18 @@ mod tests {
 
     #[test]
     fn unknown_ssh_hosts_are_refused_and_explained() {
-        let cmd = git_command(&std::env::temp_dir(), &["status"], &Auth { token: String::new(), host: String::new(), file: None });
+        let cmd = git_command(
+            &std::env::temp_dir(),
+            &["status"],
+            &Auth { token: String::new(), host: String::new(), file: None },
+        );
         let ssh = cmd.get_envs().find(|(k, _)| *k == "GIT_SSH_COMMAND").and_then(|(_, v)| v).unwrap();
         assert!(ssh.to_string_lossy().contains("StrictHostKeyChecking=yes"));
         assert!(!ssh.to_string_lossy().contains("accept-new"));
-        let msg = explain("Host key verification failed.\nfatal: Could not read from remote repository.", "git@github.com:a/b.git");
+        let msg = explain(
+            "Host key verification failed.\nfatal: Could not read from remote repository.",
+            "git@github.com:a/b.git",
+        );
         assert!(msg.contains("ssh -T git@github.com"), "{msg}");
     }
 
@@ -719,11 +761,20 @@ mod tests {
         assert_eq!(remote_kind("/home/a/notes.git"), Remote::Local);
         assert_eq!(remote_kind("file:///home/a/notes.git"), Remote::Local);
         assert_eq!(remote_kind("C:\\notes"), Remote::Local);
-        for (url, scheme) in [("http://github.com/a/b.git", "http"), ("HTTP://github.com/a", "http"), ("git://github.com/a/b.git", "git"), ("ftp://x/y", "ftp")] {
+        for (url, scheme) in [
+            ("http://github.com/a/b.git", "http"),
+            ("HTTP://github.com/a", "http"),
+            ("git://github.com/a/b.git", "git"),
+            ("ftp://x/y", "ftp"),
+        ] {
             assert_eq!(remote_kind(url), Remote::Refused(scheme.into()), "{url}");
         }
         // a sync to a plain http address stops before anything is sent
-        let settings = SyncSettings { repo_url: "http://github.com/a/b.git".into(), token: "ghp_SECRET".into(), ..Default::default() };
+        let settings = SyncSettings {
+            repo_url: "http://github.com/a/b.git".into(),
+            token: "ghp_SECRET".into(),
+            ..Default::default()
+        };
         let out = run(settings, Vec::new(), BTreeSet::new());
         assert!(!out.ok);
         assert!(out.message.contains("http://"), "{}", out.message);

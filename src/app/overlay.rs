@@ -69,7 +69,8 @@ pub(super) fn paint(ui: &egui::Ui, inp: &Input) -> Output {
             let area = Rect::from_min_max(r1.min, Pos2::new(r2.max.x, r1.max.y)).translate(gpos.to_vec2());
             painter.rect_filled(area.expand2(Vec2::new(0.5, 0.0)), 0.0, t.editor_bg);
             let size = (inp.font_size * 0.95).round();
-            let bx = Rect::from_center_size(Pos2::new(area.right() - size / 2.0 - 2.0, area.center().y), Vec2::splat(size));
+            let bx =
+                Rect::from_center_size(Pos2::new(area.right() - size / 2.0 - 2.0, area.center().y), Vec2::splat(size));
             if done {
                 painter.rect_filled(bx, 4.0, t.accent);
                 let a = bx.left_top();
@@ -118,7 +119,10 @@ pub(super) fn paint(ui: &egui::Ui, inp: &Input) -> Output {
             if let Some(name) = crate::model::image_ref(line) {
                 if let Some((_, tex, is_sketch)) = inp.pics.iter().find(|p| p.0 == name) {
                     let row = galley.pos_from_cursor(egui::text::CCursor::new(ci)).translate(gpos.to_vec2());
-                    let mask = Rect::from_min_max(Pos2::new(gpos.x - 2.0, row.top()), Pos2::new(gpos.x + w + 2.0, row.bottom()));
+                    let mask = Rect::from_min_max(
+                        Pos2::new(gpos.x - 2.0, row.top()),
+                        Pos2::new(gpos.x + w + 2.0, row.bottom()),
+                    );
                     painter.rect_filled(mask, 0.0, t.editor_bg);
                     let sz = pic_size(tex, w);
                     let r = Rect::from_min_size(Pos2::new(gpos.x, row.top() + 6.0), sz);
@@ -137,7 +141,10 @@ pub(super) fn paint(ui: &egui::Ui, inp: &Input) -> Output {
                             crate::i18n::tr("Double-clic : recadrer / redimensionner")
                         };
                         let g = painter.layout_no_wrap(hint.to_string(), FontId::proportional(11.5), Color32::WHITE);
-                        let br = Rect::from_min_size(r.left_bottom() + Vec2::new(8.0, -g.size().y - 14.0), g.size() + Vec2::new(12.0, 6.0));
+                        let br = Rect::from_min_size(
+                            r.left_bottom() + Vec2::new(8.0, -g.size().y - 14.0),
+                            g.size() + Vec2::new(12.0, 6.0),
+                        );
                         painter.rect_filled(br, 6.0, Color32::from_black_alpha(170));
                         painter.galley(br.min + Vec2::new(6.0, 3.0), g, Color32::WHITE);
                     }

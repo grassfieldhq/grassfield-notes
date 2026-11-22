@@ -40,10 +40,7 @@ impl<'a> Fonts<'a> {
     fn load() -> std::io::Result<Fonts<'static>> {
         let (r, b) = doc_fonts();
         let err = |_| std::io::Error::other(crate::i18n::tr("police introuvable pour l'export"));
-        Ok(Fonts {
-            regular: FontRef::try_from_slice(r).map_err(err)?,
-            bold: FontRef::try_from_slice(b).map_err(err)?,
-        })
+        Ok(Fonts { regular: FontRef::try_from_slice(r).map_err(err)?, bold: FontRef::try_from_slice(b).map_err(err)? })
     }
     fn font(&self, bold: bool) -> &FontRef<'a> {
         if bold {
@@ -89,7 +86,8 @@ fn layout(text: &str, g: &Geometry, fonts: &Fonts, dir: &Path, images: &mut Vec<
     for b in blocks(text) {
         if let Block::Image(name) = &b {
             // only pictures inside the note's own folder
-            let picture = crate::safefs::confine(dir, name).and_then(|p| crate::attach::load_picture(&p, crate::safefs::Links::Refuse));
+            let picture = crate::safefs::confine(dir, name)
+                .and_then(|p| crate::attach::load_picture(&p, crate::safefs::Links::Refuse));
             if let Some(img) = picture {
                 let img = img.to_rgb8();
                 let (iw, ih) = (img.width() as f32, img.height() as f32);
@@ -116,10 +114,17 @@ fn layout(text: &str, g: &Geometry, fonts: &Fonts, dir: &Path, images: &mut Vec<
         }
         let (size, bold, indent, color, before, after) = match &b {
             Block::Heading(l, _) => {
-                let k = match l { 1 => 1.8, 2 => 1.45, 3 => 1.2, _ => 1.05 };
+                let k = match l {
+                    1 => 1.8,
+                    2 => 1.45,
+                    3 => 1.2,
+                    _ => 1.05,
+                };
                 (g.base * k, true, 0.0, black, g.base * 0.9, g.base * 0.35)
             }
-            Block::Bullet(_) | Block::Number(..) | Block::Todo(..) => (g.base, false, g.base * 1.7, black, 0.0, g.base * 0.15),
+            Block::Bullet(_) | Block::Number(..) | Block::Todo(..) => {
+                (g.base, false, g.base * 1.7, black, 0.0, g.base * 0.15)
+            }
             Block::Quote(_) => (g.base, false, g.base * 1.3, gray, g.base * 0.2, g.base * 0.3),
             Block::Code(_) => (g.base * 0.9, false, g.base * 0.8, [0x44, 0x44, 0x44], 0.0, 0.0),
             Block::Rule => (g.base, false, 0.0, gray, g.base * 0.5, g.base * 0.5),
@@ -173,9 +178,30 @@ fn layout(text: &str, g: &Geometry, fonts: &Fonts, dir: &Path, images: &mut Vec<
                     let baseline = y + size * 1.1;
                     if i == 0 {
                         match &b {
-                            Block::Bullet(_) => page.runs.push(Run { x: g.margin + g.base * 0.5, y: baseline, size, bold: false, text: "•".into(), color: green, strike: false }),
-                            Block::Number(n, _) => page.runs.push(Run { x: g.margin, y: baseline, size, bold: false, text: format!("{n}."), color: green, strike: false }),
-                            Block::Todo(done, _) => page.decos.push(Deco::Box { x: g.margin + g.base * 0.15, y: baseline - size * 0.8, size: size * 0.85, done: *done }),
+                            Block::Bullet(_) => page.runs.push(Run {
+                                x: g.margin + g.base * 0.5,
+                                y: baseline,
+                                size,
+                                bold: false,
+                                text: "•".into(),
+                                color: green,
+                                strike: false,
+                            }),
+                            Block::Number(n, _) => page.runs.push(Run {
+                                x: g.margin,
+                                y: baseline,
+                                size,
+                                bold: false,
+                                text: format!("{n}."),
+                                color: green,
+                                strike: false,
+                            }),
+                            Block::Todo(done, _) => page.decos.push(Deco::Box {
+                                x: g.margin + g.base * 0.15,
+                                y: baseline - size * 0.8,
+                                size: size * 0.85,
+                                done: *done,
+                            }),
                             _ => {}
                         }
                     }
@@ -183,7 +209,15 @@ fn layout(text: &str, g: &Geometry, fonts: &Fonts, dir: &Path, images: &mut Vec<
                         Block::Todo(true, _) => (gray, true),
                         _ => (color, false),
                     };
-                    page.runs.push(Run { x: g.margin + indent, y: baseline, size, bold, text: l.clone(), color: c, strike });
+                    page.runs.push(Run {
+                        x: g.margin + indent,
+                        y: baseline,
+                        size,
+                        bold,
+                        text: l.clone(),
+                        color: c,
+                        strike,
+                    });
                     y += line_h;
                 }
                 if let Block::Quote(_) = b {
@@ -218,16 +252,29 @@ pub fn pdf(text: &str, dir: &Path) -> std::io::Result<Vec<u8>> {
         let mut c = String::new();
         for d in &page.decos {
             match d {
-                Deco::Line { x1, x2, y } => c.push_str(&format!("0.8 0.8 0.8 RG 0.8 w {x1:.2} {:.2} m {x2:.2} {:.2} l S\n", 842.0 - y, 842.0 - y)),
-                Deco::Bar { x, y1, y2 } => c.push_str(&format!("0.3 0.6 0.32 rg {x:.2} {:.2} 2.5 {:.2} re f\n", 842.0 - y2, y2 - y1)),
-                Deco::Image { x, y, w, h, idx } => c.push_str(&format!("q {w:.2} 0 0 {h:.2} {x:.2} {:.2} cm /Im{idx} Do Q\n", 842.0 - y - h)),
+                Deco::Line { x1, x2, y } => c.push_str(&format!(
+                    "0.8 0.8 0.8 RG 0.8 w {x1:.2} {:.2} m {x2:.2} {:.2} l S\n",
+                    842.0 - y,
+                    842.0 - y
+                )),
+                Deco::Bar { x, y1, y2 } => {
+                    c.push_str(&format!("0.3 0.6 0.32 rg {x:.2} {:.2} 2.5 {:.2} re f\n", 842.0 - y2, y2 - y1))
+                }
+                Deco::Image { x, y, w, h, idx } => {
+                    c.push_str(&format!("q {w:.2} 0 0 {h:.2} {x:.2} {:.2} cm /Im{idx} Do Q\n", 842.0 - y - h))
+                }
                 Deco::Box { x, y, size, done } => {
                     let by = 842.0 - y - size;
                     if *done {
                         c.push_str(&format!("0.3 0.6 0.32 rg {x:.2} {by:.2} {size:.2} {size:.2} re f\n"));
                         c.push_str(&format!(
                             "1 1 1 RG 1.4 w {:.2} {:.2} m {:.2} {:.2} l {:.2} {:.2} l S\n",
-                            x + size * 0.22, by + size * 0.5, x + size * 0.43, by + size * 0.28, x + size * 0.78, by + size * 0.72
+                            x + size * 0.22,
+                            by + size * 0.5,
+                            x + size * 0.43,
+                            by + size * 0.28,
+                            x + size * 0.78,
+                            by + size * 0.72
                         ));
                     } else {
                         c.push_str(&format!("0.3 0.6 0.32 RG 1 w {x:.2} {by:.2} {size:.2} {size:.2} re S\n"));
@@ -249,12 +296,19 @@ pub fn pdf(text: &str, dir: &Path) -> std::io::Result<Vec<u8>> {
             let [cr, cg, cb] = r.color.map(|v| v as f32 / 255.0);
             c.push_str(&format!(
                 "BT /F{} {:.2} Tf {cr:.3} {cg:.3} {cb:.3} rg 1 0 0 1 {:.2} {:.2} Tm <{hex}> Tj ET\n",
-                fi + 1, r.size, r.x, 842.0 - r.y
+                fi + 1,
+                r.size,
+                r.x,
+                842.0 - r.y
             ));
             if r.strike {
                 let w = fonts.width(&r.text, r.bold, r.size);
                 let sy = 842.0 - r.y + r.size * 0.3;
-                c.push_str(&format!("{cr:.3} {cg:.3} {cb:.3} RG 0.7 w {:.2} {sy:.2} m {:.2} {sy:.2} l S\n", r.x, r.x + w));
+                c.push_str(&format!(
+                    "{cr:.3} {cg:.3} {cb:.3} RG 0.7 w {:.2} {sy:.2} m {:.2} {sy:.2} l S\n",
+                    r.x,
+                    r.x + w
+                ));
             }
         }
         contents.push(c);
@@ -293,7 +347,8 @@ pub fn pdf(text: &str, dir: &Path) -> std::io::Result<Vec<u8>> {
         objs.push(format!("<< /Type /Font /Subtype /CIDFontType2 /BaseFont /{name} /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor {} 0 R /DW 500 /W [{w}] /CIDToGIDMap /Identity >>", base + 2).into_bytes());
         objs.push(format!("<< /Type /FontDescriptor /FontName /{name} /Flags 32 /FontBBox [-300 {desc} 1200 {asc}] /ItalicAngle 0 /Ascent {asc} /Descent {desc} /CapHeight {} /StemV 80 /FontFile2 {} 0 R >>", (asc as f32 * 0.7) as i64, base + 3).into_bytes());
         let packed = deflate(bytes);
-        let mut ff = format!("<< /Length {} /Length1 {} /Filter /FlateDecode >>\nstream\n", packed.len(), bytes.len()).into_bytes();
+        let mut ff = format!("<< /Length {} /Length1 {} /Filter /FlateDecode >>\nstream\n", packed.len(), bytes.len())
+            .into_bytes();
         ff.extend_from_slice(&packed);
         ff.extend_from_slice(b"\nendstream");
         objs.push(ff);
@@ -353,7 +408,9 @@ pub fn pdf(text: &str, dir: &Path) -> std::io::Result<Vec<u8>> {
     for off in offsets {
         out.extend_from_slice(format!("{off:010} 00000 n \n").as_bytes());
     }
-    out.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", all.len() + 1).as_bytes());
+    out.extend_from_slice(
+        format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", all.len() + 1).as_bytes(),
+    );
     Ok(out)
 }
 
@@ -364,7 +421,8 @@ pub fn jpg(text: &str, path: &Path, dir: &Path) -> std::io::Result<()> {
     let mut images = Vec::new();
     let pages = layout(text, &g, &fonts, dir, &mut images);
     let page = &pages[0];
-    let pic_bottom = page.decos.iter().map(|d| if let Deco::Image { y, h, .. } = d { y + h } else { 0.0 }).fold(0.0f32, f32::max);
+    let pic_bottom =
+        page.decos.iter().map(|d| if let Deco::Image { y, h, .. } = d { y + h } else { 0.0 }).fold(0.0f32, f32::max);
     let bottom = page.runs.iter().map(|r| r.y + r.size).fold(pic_bottom, f32::max).max(400.0);
     let (w, h) = (g.width as u32, (bottom + g.margin) as u32);
     let mut img = image::RgbImage::from_pixel(w, h, image::Rgb([255, 255, 255]));
@@ -390,7 +448,12 @@ pub fn jpg(text: &str, path: &Path, dir: &Path) -> std::io::Result<()> {
             Deco::Line { x1, x2, y } => rect(&mut blend, *x1, *y, x2 - x1, 2.0, [0xdd, 0xdd, 0xdd]),
             Deco::Bar { x, y1, y2 } => rect(&mut blend, *x, *y1, 5.0, y2 - y1, green),
             Deco::Image { x, y, w, h, idx } => {
-                let pic = image::imageops::resize(&images[*idx], (*w as u32).max(1), (*h as u32).max(1), image::imageops::FilterType::Triangle);
+                let pic = image::imageops::resize(
+                    &images[*idx],
+                    (*w as u32).max(1),
+                    (*h as u32).max(1),
+                    image::imageops::FilterType::Triangle,
+                );
                 for (px, py, c) in pic.enumerate_pixels() {
                     blend(*x as i32 + px as i32, *y as i32 + py as i32, c.0, 1.0);
                 }
@@ -429,7 +492,8 @@ pub fn jpg(text: &str, path: &Path, dir: &Path) -> std::io::Result<()> {
             let glyph = id.with_scale_and_position(scale, ab_glyph::point(x, r.y));
             if let Some(outline) = font.outline_glyph(glyph) {
                 let bb = outline.px_bounds();
-                outline.draw(|gx, gy, cov| blend(bb.min.x as i32 + gx as i32, bb.min.y as i32 + gy as i32, r.color, cov));
+                outline
+                    .draw(|gx, gy, cov| blend(bb.min.x as i32 + gx as i32, bb.min.y as i32 + gy as i32, r.color, cov));
             }
             x += sf.h_advance(id);
         }

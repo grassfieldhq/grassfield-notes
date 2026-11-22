@@ -198,10 +198,8 @@ pub fn tag_spans(text: &str) -> Vec<(usize, usize)> {
         }
         if c == '#' && !in_code {
             let prev_ok = i == 0 || bytes[i - 1].1.is_whitespace() || bytes[i - 1].1 == '(';
-            let next_ok = i + 1 < bytes.len()
-                && is_tag_char(bytes[i + 1].1)
-                && bytes[i + 1].1 != '/'
-                && bytes[i + 1].1 != '-';
+            let next_ok =
+                i + 1 < bytes.len() && is_tag_char(bytes[i + 1].1) && bytes[i + 1].1 != '/' && bytes[i + 1].1 != '-';
             if prev_ok && next_ok {
                 let mut j = i + 1;
                 while j < bytes.len() && is_tag_char(bytes[j].1) {
@@ -415,9 +413,7 @@ pub fn tag_match_len(name: &str, tag: &str) -> Option<usize> {
 }
 
 pub fn tag_matches(note_tags: &BTreeSet<String>, tag: &str) -> bool {
-    note_tags
-        .iter()
-        .any(|t| t == tag || (t.starts_with(tag) && t[tag.len()..].starts_with('/')))
+    note_tags.iter().any(|t| t == tag || (t.starts_with(tag) && t[tag.len()..].starts_with('/')))
 }
 
 impl Library {
@@ -446,7 +442,13 @@ impl Library {
                 return lib;
             }
             // keep a copy of an unreadable file instead of overwriting it
-            let _ = crate::safefs::copy_regular(&p, crate::safefs::Links::Refuse, &p.with_extension("json.bak"), 1 << 30, 0o600);
+            let _ = crate::safefs::copy_regular(
+                &p,
+                crate::safefs::Links::Refuse,
+                &p.with_extension("json.bak"),
+                1 << 30,
+                0o600,
+            );
         }
         Self::sample()
     }
@@ -483,11 +485,16 @@ impl Library {
             use std::os::unix::fs::{MetadataExt, PermissionsExt};
             let uid = unsafe { libc::geteuid() };
             let mine = |p: &std::path::Path, dir: bool| {
-                std::fs::symlink_metadata(p).map(|m| m.uid() == uid && if dir { m.is_dir() } else { m.is_file() }).unwrap_or(false)
+                std::fs::symlink_metadata(p)
+                    .map(|m| m.uid() == uid && if dir { m.is_dir() } else { m.is_file() })
+                    .unwrap_or(false)
             };
             let default = dirs::data_dir().map(|d| d.join("grassfield-notes"));
             let dir = Self::data_dir();
-            if std::env::var_os("GRASSFIELD_DATA").is_none() && default.as_deref() == Some(dir.as_path()) && mine(&dir, true) {
+            if std::env::var_os("GRASSFIELD_DATA").is_none()
+                && default.as_deref() == Some(dir.as_path())
+                && mine(&dir, true)
+            {
                 let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
             }
             for f in [Self::data_path(), Self::data_path().with_extension("json.bak")] {
@@ -540,11 +547,7 @@ impl Library {
 
     pub fn find_by_title(&self, title: &str) -> Option<u64> {
         let tl = title.to_lowercase();
-        self.notes
-            .iter()
-            .filter(|n| !n.trashed)
-            .find(|n| n.title().to_lowercase() == tl)
-            .map(|n| n.id)
+        self.notes.iter().filter(|n| !n.trashed).find(|n| n.title().to_lowercase() == tl).map(|n| n.id)
     }
 
     /// Re-parse tags only for notes whose text changed since the last call.
@@ -594,10 +597,7 @@ impl Library {
 
     /// Notes visible in the list for a filter and a search query, sorted.
     pub fn visible(&self, filter: &Filter, query: &str) -> Vec<u64> {
-        let terms: Vec<String> = query
-            .split_whitespace()
-            .map(|s| s.to_lowercase())
-            .collect();
+        let terms: Vec<String> = query.split_whitespace().map(|s| s.to_lowercase()).collect();
         let mut v: Vec<&Note> = self
             .notes
             .iter()
@@ -724,13 +724,13 @@ impl Library {
     }
 
     pub fn sample() -> Self {
-        let mut lib = Library {
-            settings: Settings::default(),
-            ..Default::default()
-        };
+        let mut lib = Library { settings: Settings::default(), ..Default::default() };
         let t = now();
         let english = crate::i18n::lang() != crate::i18n::Lang::Fr;
-        let samples: [(&str, i64, bool); 6] = if english { SAMPLES_EN } else { [
+        let samples: [(&str, i64, bool); 6] = if english {
+            SAMPLES_EN
+        } else {
+            [
             (
                 "# Bienvenue dans Grassfield Notes\n\nUn carnet calme pour vos idées, écrit en **Markdown**. Tout ce que vous tapez est mis en forme en direct.\n\n## Pour commencer\n- [x] Ouvrir Grassfield Notes\n- [ ] Écrire une première note avec **Ctrl+N**\n- [ ] Ajouter un tag comme #idées ou #travail/projets\n- [ ] Cliquer sur une case pour la cocher\n\n## Mise en forme\nDu texte en **gras**, en *italique*, ~~barré~~, ==surligné== ou du `code en ligne`.\n\n> Les citations ressortent avec une barre verte.\n\nReliez vos notes entre elles avec [[Idées de jardin]] (Ctrl+clic pour l'ouvrir).\n\n#bienvenue",
                 0,
@@ -761,7 +761,8 @@ impl Library {
                 86400 * 5,
                 false,
             ),
-        ]};
+        ]
+        };
         for (text, age, pinned) in samples {
             let id = lib.new_note(text.to_string());
             let n = lib.get_mut(id).unwrap();
@@ -793,9 +794,7 @@ pub fn tag_spans_full(text: &str) -> Vec<(usize, usize)> {
 }
 
 pub fn word_count(text: &str) -> usize {
-    text.split_whitespace()
-        .filter(|w| w.chars().any(|c| c.is_alphanumeric()))
-        .count()
+    text.split_whitespace().filter(|w| w.chars().any(|c| c.is_alphanumeric())).count()
 }
 
 pub fn format_date(ts: i64) -> String {
@@ -810,7 +809,15 @@ pub fn format_date(ts: i64) -> String {
     } else if Some(d) == today.pred_opt() {
         crate::i18n::tr("Hier").to_string()
     } else if (today - d).num_days() < 7 {
-        let days = [crate::i18n::tr("lun."), crate::i18n::tr("mar."), crate::i18n::tr("mer."), crate::i18n::tr("jeu."), crate::i18n::tr("ven."), crate::i18n::tr("sam."), crate::i18n::tr("dim.")];
+        let days = [
+            crate::i18n::tr("lun."),
+            crate::i18n::tr("mar."),
+            crate::i18n::tr("mer."),
+            crate::i18n::tr("jeu."),
+            crate::i18n::tr("ven."),
+            crate::i18n::tr("sam."),
+            crate::i18n::tr("dim."),
+        ];
         use chrono::Datelike;
         days[d.weekday().num_days_from_monday() as usize].to_string()
     } else {

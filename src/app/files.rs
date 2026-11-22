@@ -60,11 +60,17 @@ pub(super) struct ConflictPrompt {
 /// A deleted file is written anew.
 fn write_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
     match std::fs::symlink_metadata(path) {
-        Ok(m) if m.file_type().is_symlink() => return Err(tr("Le fichier a été remplacé par un lien : il n'a pas été enregistré.").to_string()),
-        Ok(m) if !m.is_file() => return Err(tr("Ce n'est plus un fichier ordinaire : il n'a pas été enregistré.").to_string()),
+        Ok(m) if m.file_type().is_symlink() => {
+            return Err(tr("Le fichier a été remplacé par un lien : il n'a pas été enregistré.").to_string())
+        }
+        Ok(m) if !m.is_file() => {
+            return Err(tr("Ce n'est plus un fichier ordinaire : il n'a pas été enregistré.").to_string())
+        }
         _ => {}
     }
-    crate::safefs::save_document(path, bytes, &Library::data_dir().join("backups")).map(|_| ()).map_err(|e| e.to_string())
+    crate::safefs::save_document(path, bytes, &Library::data_dir().join("backups"))
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 pub(super) fn is_markdown(p: &Path) -> bool {
@@ -133,11 +139,24 @@ impl OpenFile {
 
     /// The file as a note, for exports.
     pub fn as_note(&self) -> model::Note {
-        model::Note { id: self.uid, text: self.text.clone(), created: now(), modified: now(), pinned: false, archived: false, trashed: false, attachments: vec![] }
+        model::Note {
+            id: self.uid,
+            text: self.text.clone(),
+            created: now(),
+            modified: now(),
+            pinned: false,
+            archived: false,
+            trashed: false,
+            attachments: vec![],
+        }
     }
 
     fn disk_text(&self) -> String {
-        if self.crlf { self.text.replace('\n', "\r\n") } else { self.text.clone() }
+        if self.crlf {
+            self.text.replace('\n', "\r\n")
+        } else {
+            self.text.clone()
+        }
     }
 
     /// The file changed on disk since it was read or saved here.
@@ -361,7 +380,12 @@ impl GrassApp {
             }
             Choice::SaveAs if self.screenshot.is_none() && crate::portal::available() => {
                 let f = &self.files[i];
-                let rx = crate::portal::ask(ctx, tr("Enregistrer sous…").to_string(), crate::portal::Ask::Save { name: f.name() }, Some(f.dir()));
+                let rx = crate::portal::ask(
+                    ctx,
+                    tr("Enregistrer sous…").to_string(),
+                    crate::portal::Ask::Save { name: f.name() },
+                    Some(f.dir()),
+                );
                 self.save_as_panel = Some((prompt, rx));
                 false
             }
@@ -396,7 +420,9 @@ impl GrassApp {
         let saved = match answer {
             crate::portal::Answer::Files(p) if !p.is_empty() => {
                 let text = self.files[i].disk_text();
-                crate::safefs::write_atomic(&p[0], text.as_bytes(), 0o644).map(|_| p[0].clone()).map_err(|e| e.to_string())
+                crate::safefs::write_atomic(&p[0], text.as_bytes(), 0o644)
+                    .map(|_| p[0].clone())
+                    .map_err(|e| e.to_string())
             }
             crate::portal::Answer::Unavailable => self.files[i].save_copy(),
             // cancelled: the question comes back
@@ -425,7 +451,8 @@ impl GrassApp {
             AfterConflict::Quit => {
                 if let Some(next) = self.files.iter_mut().position(|f| f.in_conflict()) {
                     self.active_file = Some(next);
-                    self.conflict_prompt = Some(ConflictPrompt { uid: self.files[next].uid, then: AfterConflict::Quit });
+                    self.conflict_prompt =
+                        Some(ConflictPrompt { uid: self.files[next].uid, then: AfterConflict::Quit });
                 } else {
                     self.quit_confirmed = true;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -482,8 +509,9 @@ impl GrassApp {
             if let Some(name) = crate::model::image_ref(line) {
                 // only pictures inside the file's own folder come along: the library is
                 // synced, so a path to any other file on the computer is never copied in
-                let picture = crate::safefs::confine(base_dir, name)
-                    .filter(|p| attach::kind_of(p, crate::safefs::Links::Refuse).map(|k| k.is_picture()).unwrap_or(false));
+                let picture = crate::safefs::confine(base_dir, name).filter(|p| {
+                    attach::kind_of(p, crate::safefs::Links::Refuse).map(|k| k.is_picture()).unwrap_or(false)
+                });
                 if let Some(p) = picture {
                     if let Ok(a) = attach::store(id, &p) {
                         let nl = if line.ends_with('\n') { "\n" } else { "" };
@@ -521,7 +549,11 @@ impl GrassApp {
             let path = inbox_dir().join(format!("{}.json", chrono::Local::now().format("%Y%m%d-%H%M%S%3f")));
             let ok = std::fs::create_dir_all(inbox_dir()).is_ok()
                 && serde_json::to_string(&item).ok().map(|s| std::fs::write(&path, s).is_ok()).unwrap_or(false);
-            let msg = if ok { trf("« {name} » envoyé à vos notes dans l'autre fenêtre", &[("name", &name)]) } else { tr("Impossible d'ajouter le fichier à vos notes").to_string() };
+            let msg = if ok {
+                trf("« {name} » envoyé à vos notes dans l'autre fenêtre", &[("name", &name)])
+            } else {
+                tr("Impossible d'ajouter le fichier à vos notes").to_string()
+            };
             self.notify(ctx, msg);
         }
     }
@@ -543,7 +575,9 @@ impl GrassApp {
             if p.extension().and_then(|x| x.to_str()) != Some("json") {
                 continue;
             }
-            if let Some(item) = std::fs::read_to_string(&p).ok().and_then(|s| serde_json::from_str::<InboxItem>(&s).ok()) {
+            if let Some(item) =
+                std::fs::read_to_string(&p).ok().and_then(|s| serde_json::from_str::<InboxItem>(&s).ok())
+            {
                 if self.add_text_to_library(ctx, &item.text, &item.base_dir).is_some() {
                     added += 1;
                 }
@@ -564,7 +598,10 @@ impl GrassApp {
         }
         let tex = attach::load_picture(p, crate::safefs::Links::Refuse).map(|img| {
             let small = img.thumbnail(1000, 1000).to_rgba8();
-            let ci = egui::ColorImage::from_rgba_unmultiplied([small.width() as usize, small.height() as usize], small.as_raw());
+            let ci = egui::ColorImage::from_rgba_unmultiplied(
+                [small.width() as usize, small.height() as usize],
+                small.as_raw(),
+            );
             ctx.load_texture(format!("file-pic-{}", p.display()), ci, egui::TextureOptions::LINEAR)
         });
         self.file_thumbs.insert(p.to_path_buf(), (m, tex.clone()));
@@ -637,7 +674,11 @@ impl GrassApp {
             .frame(egui::Frame::new().fill(t.list_bg).inner_margin(Margin::symmetric(12, 8)))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    if ui.button(tr("‹  Mes notes")).on_hover_text(tr("Revenir à la bibliothèque (les fichiers restent ouverts)")).clicked() {
+                    if ui
+                        .button(tr("‹  Mes notes"))
+                        .on_hover_text(tr("Revenir à la bibliothèque (les fichiers restent ouverts)"))
+                        .clicked()
+                    {
                         self.active_file = None;
                     }
                     ui.add_space(8.0);
@@ -655,17 +696,35 @@ impl GrassApp {
                             .inner_margin(Margin::symmetric(6, 2))
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
-                                    let r = ui.add(egui::Label::new(egui::RichText::new(label).color(if sel { t.text } else { t.muted })).sense(Sense::click()));
+                                    let r = ui.add(
+                                        egui::Label::new(egui::RichText::new(label).color(if sel {
+                                            t.text
+                                        } else {
+                                            t.muted
+                                        }))
+                                        .sense(Sense::click()),
+                                    );
                                     if r.on_hover_text(f.path.display().to_string()).clicked() {
                                         self.active_file = Some(k);
                                     }
-                                    if ui.add(egui::Button::new(egui::RichText::new("✖").size(10.0).color(t.muted)).frame(false)).on_hover_text(tr("Fermer (Ctrl+W)")).clicked() {
+                                    if ui
+                                        .add(
+                                            egui::Button::new(egui::RichText::new("✖").size(10.0).color(t.muted))
+                                                .frame(false),
+                                        )
+                                        .on_hover_text(tr("Fermer (Ctrl+W)"))
+                                        .clicked()
+                                    {
                                         close_tab = Some(k);
                                     }
                                 });
                             });
                     }
-                    if ui.add(egui::Button::new(egui::RichText::new("+").size(16.0).color(t.accent_text)).frame(false)).on_hover_text(tr("Ouvrir un fichier Markdown (Ctrl+O)")).clicked() {
+                    if ui
+                        .add(egui::Button::new(egui::RichText::new("+").size(16.0).color(t.accent_text)).frame(false))
+                        .on_hover_text(tr("Ouvrir un fichier Markdown (Ctrl+O)"))
+                        .clicked()
+                    {
                         self.actions.push(Action::PickFiles(Purpose::OpenFile));
                     }
                 });
@@ -697,7 +756,11 @@ impl GrassApp {
                             let _ = crate::platform::open_path(&dir);
                         }
                         let can_add = self.persist || self.other_instance;
-                        if ui.add_enabled(can_add, egui::Button::new(tr("📥  Ajouter à mes notes"))).on_hover_text(tr("Copier ce fichier dans Grassfield Notes, avec ses images")).clicked() {
+                        if ui
+                            .add_enabled(can_add, egui::Button::new(tr("📥  Ajouter à mes notes")))
+                            .on_hover_text(tr("Copier ce fichier dans Grassfield Notes, avec ses images"))
+                            .clicked()
+                        {
                             action_add = true;
                         }
                         let (label, tip) = if self.file_reading {
@@ -705,7 +768,9 @@ impl GrassApp {
                         } else {
                             (tr("📖  Lecture"), tr("Masquer les symboles Markdown et lire tranquillement"))
                         };
-                        let b = egui::Button::new(egui::RichText::new(label).color(Color32::WHITE)).fill(t.accent).stroke(Stroke::NONE);
+                        let b = egui::Button::new(egui::RichText::new(label).color(Color32::WHITE))
+                            .fill(t.accent)
+                            .stroke(Stroke::NONE);
                         if ui.add_enabled(!ro || !self.file_reading, b).on_hover_text(tip).clicked() {
                             toggle_reading = true;
                         }
@@ -728,7 +793,12 @@ impl GrassApp {
                 self.notify(&ctx, tr("Un export attend déjà que vous choisissiez où l'enregistrer."));
             } else if self.screenshot.is_none() && crate::portal::available() {
                 let name = export::file_name(&self.files[i].as_note(), fmt);
-                let rx = crate::portal::ask(&ctx, tr("Exporter").to_string(), crate::portal::Ask::Save { name }, Some(Self::export_dir()));
+                let rx = crate::portal::ask(
+                    &ctx,
+                    tr("Exporter").to_string(),
+                    crate::portal::Ask::Save { name },
+                    Some(Self::export_dir()),
+                );
                 self.export_panel = Some((ExportTarget::File(self.files[i].uid), fmt, rx));
             } else {
                 self.write_file_export(&ctx, i, fmt, None);
@@ -744,22 +814,28 @@ impl GrassApp {
             err = Some(tr("Ce fichier est trop volumineux pour être modifié ici : il s'ouvre en lecture seule, sans mise en forme.").to_string());
         }
         if conflict || err.is_some() {
-            egui::Frame::new().fill(t.highlight_bg.gamma_multiply(0.6)).inner_margin(Margin::symmetric(16, 8)).show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    if conflict {
-                        ui.label(egui::RichText::new(tr("Le fichier a été modifié par un autre programme.")).color(t.text));
-                        if ui.button(tr("Recharger le fichier")).clicked() {
-                            self.files[i].reload();
+            egui::Frame::new().fill(t.highlight_bg.gamma_multiply(0.6)).inner_margin(Margin::symmetric(16, 8)).show(
+                ui,
+                |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        if conflict {
+                            ui.label(
+                                egui::RichText::new(tr("Le fichier a été modifié par un autre programme."))
+                                    .color(t.text),
+                            );
+                            if ui.button(tr("Recharger le fichier")).clicked() {
+                                self.files[i].reload();
+                            }
+                            if ui.button(tr("Garder ma version")).clicked() {
+                                let _ = self.files[i].save();
+                            }
+                        } else if let Some(e) = &err {
+                            ui.label(egui::RichText::new(e).color(t.text));
                         }
-                        if ui.button(tr("Garder ma version")).clicked() {
-                            let _ = self.files[i].save();
-                        }
-                    } else if let Some(e) = &err {
-                        ui.label(egui::RichText::new(e).color(t.text));
-                    }
-                });
-            });
+                    });
+                },
+            );
         }
 
         // pictures referenced by the file
@@ -794,77 +870,88 @@ impl GrassApp {
         let mut edited = false;
         let f = &mut self.files[i];
         let editor_id = Id::unique(("file-editor", f.uid));
-        egui::ScrollArea::vertical()
-            .id_salt(("file-scroll", f.uid))
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                let avail = ui.available_width();
-                let pad = if avail < 520.0 { 16.0 } else { 40.0 };
-                let w = settings.line_width.min(avail - 2.0 * pad).max(120.0);
-                let side = ((avail - w) / 2.0).max(pad.min(avail / 2.0));
-                ui.add_space(28.0);
-                let mut img_key = 0u64;
-                for (name, tex, _) in &pics {
-                    let h = overlay::pic_size(tex, w).y + 16.0;
-                    style.images.insert(name.clone(), h);
-                    img_key = img_key.wrapping_mul(31).wrapping_add(h.to_bits() as u64 ^ name.len() as u64);
+        egui::ScrollArea::vertical().id_salt(("file-scroll", f.uid)).auto_shrink([false, false]).show(ui, |ui| {
+            let avail = ui.available_width();
+            let pad = if avail < 520.0 { 16.0 } else { 40.0 };
+            let w = settings.line_width.min(avail - 2.0 * pad).max(120.0);
+            let side = ((avail - w) / 2.0).max(pad.min(avail / 2.0));
+            ui.add_space(28.0);
+            let mut img_key = 0u64;
+            for (name, tex, _) in &pics {
+                let h = overlay::pic_size(tex, w).y + 16.0;
+                style.images.insert(name.clone(), h);
+                img_key = img_key.wrapping_mul(31).wrapping_add(h.to_bits() as u64 ^ name.len() as u64);
+            }
+            let style_key = (
+                settings.theme,
+                settings.font_size.to_bits(),
+                settings.editor_font as u8,
+                settings.dim_markup,
+                settings.line_spacing.to_bits(),
+                reading,
+                img_key,
+            );
+            ui.horizontal(|ui| {
+                ui.add_space(side);
+                let plain = f.plain;
+                let cache = &mut f.cache;
+                let lines = &mut f.lines;
+                let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap: f32| {
+                    use std::hash::{Hash, Hasher};
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    buf.as_str().hash(&mut h);
+                    wrap.to_bits().hash(&mut h);
+                    style_key.hash(&mut h);
+                    let key = h.finish();
+                    let job = match cache {
+                        Some((k, job)) if *k == key => job.clone(),
+                        _ => {
+                            let job = if plain {
+                                markdown::plain_job(buf.as_str(), &style, wrap)
+                            } else {
+                                markdown::layout_job_cached(buf.as_str(), &style, wrap, lines)
+                            };
+                            *cache = Some((key, job.clone()));
+                            job
+                        }
+                    };
+                    ui.fonts_mut(|fo| fo.layout_job(job))
+                };
+                let min_h = (ui.available_height() - 40.0).max(200.0);
+                let selection_before = textedit::saved_selection(ui.ctx(), editor_id);
+                let out = if reading {
+                    // selectable but not editable
+                    let mut ro: &str = f.text.as_str();
+                    egui::TextEdit::multiline(&mut ro)
+                        .id(editor_id)
+                        .frame(egui::Frame::NONE)
+                        .desired_width(w)
+                        .min_size(Vec2::new(w, min_h))
+                        .layouter(&mut layouter)
+                        .show(ui)
+                } else {
+                    egui::TextEdit::multiline(&mut f.text)
+                        .id(editor_id)
+                        .frame(egui::Frame::NONE)
+                        .desired_width(w)
+                        .min_size(Vec2::new(w, min_h))
+                        .lock_focus(true)
+                        .hint_text(tr("Commencez à écrire…"))
+                        .layouter(&mut layouter)
+                        .show(ui)
+                };
+                let resp = out.response.response.clone();
+                if resp.changed() {
+                    edited = true;
                 }
-                let style_key = (settings.theme, settings.font_size.to_bits(), settings.editor_font as u8, settings.dim_markup, settings.line_spacing.to_bits(), reading, img_key);
-                ui.horizontal(|ui| {
-                    ui.add_space(side);
-                    let plain = f.plain;
-                    let cache = &mut f.cache;
-                    let lines = &mut f.lines;
-                    let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap: f32| {
-                        use std::hash::{Hash, Hasher};
-                        let mut h = std::collections::hash_map::DefaultHasher::new();
-                        buf.as_str().hash(&mut h);
-                        wrap.to_bits().hash(&mut h);
-                        style_key.hash(&mut h);
-                        let key = h.finish();
-                        let job = match cache {
-                            Some((k, job)) if *k == key => job.clone(),
-                            _ => {
-                                let job = if plain { markdown::plain_job(buf.as_str(), &style, wrap) } else { markdown::layout_job_cached(buf.as_str(), &style, wrap, lines) };
-                                *cache = Some((key, job.clone()));
-                                job
-                            }
-                        };
-                        ui.fonts_mut(|fo| fo.layout_job(job))
-                    };
-                    let min_h = (ui.available_height() - 40.0).max(200.0);
-                    let selection_before = textedit::saved_selection(ui.ctx(), editor_id);
-                    let out = if reading {
-                        // selectable but not editable
-                        let mut ro: &str = f.text.as_str();
-                        egui::TextEdit::multiline(&mut ro)
-                            .id(editor_id)
-                            .frame(egui::Frame::NONE)
-                            .desired_width(w)
-                            .min_size(Vec2::new(w, min_h))
-                            .layouter(&mut layouter)
-                            .show(ui)
-                    } else {
-                        egui::TextEdit::multiline(&mut f.text)
-                            .id(editor_id)
-                            .frame(egui::Frame::NONE)
-                            .desired_width(w)
-                            .min_size(Vec2::new(w, min_h))
-                            .lock_focus(true)
-                            .hint_text(tr("Commencez à écrire…"))
-                            .layouter(&mut layouter)
-                            .show(ui)
-                    };
-                    let resp = out.response.response.clone();
-                    if resp.changed() {
-                        edited = true;
-                    }
-                    let selection = textedit::keep_selection_on_right_click(ui.ctx(), editor_id, selection_before, &out)
-                        .or_else(|| out.cursor_range.map(|r| r.as_sorted_char_range()).map(|r| (r.start.0, r.end.0)))
-                        .or(selection_before);
-                    textedit::context_menu(&resp, editor_id, !reading, selection, &f.text);
-                    let galley = out.galley.clone();
-                    let ov = overlay::paint(ui, &overlay::Input {
+                let selection = textedit::keep_selection_on_right_click(ui.ctx(), editor_id, selection_before, &out)
+                    .or_else(|| out.cursor_range.map(|r| r.as_sorted_char_range()).map(|r| (r.start.0, r.end.0)))
+                    .or(selection_before);
+                textedit::context_menu(&resp, editor_id, !reading, selection, &f.text);
+                let galley = out.galley.clone();
+                let ov = overlay::paint(
+                    ui,
+                    &overlay::Input {
                         text: &f.text,
                         galley: &galley,
                         gpos: out.galley_pos,
@@ -875,20 +962,21 @@ impl GrassApp {
                         theme: &t,
                         pics: &pics,
                         editable: !reading,
-                    });
-                    clicked_box = ov.clicked_box;
-                    open_pic = ov.open_pic.map(|p| p.0);
-                    // links: a plain click while reading, Ctrl+click while editing
-                    let cmd = ui.input(|x| x.modifiers.command);
-                    if resp.clicked() && (reading || cmd) {
-                        if let Some(p) = resp.interact_pointer_pos() {
-                            let c = galley.cursor_from_pos(p - out.galley_pos);
-                            link_at = Some(f.text.char_indices().nth(c.index.0).map(|(b, _)| b).unwrap_or(f.text.len()));
-                        }
+                    },
+                );
+                clicked_box = ov.clicked_box;
+                open_pic = ov.open_pic.map(|p| p.0);
+                // links: a plain click while reading, Ctrl+click while editing
+                let cmd = ui.input(|x| x.modifiers.command);
+                if resp.clicked() && (reading || cmd) {
+                    if let Some(p) = resp.interact_pointer_pos() {
+                        let c = galley.cursor_from_pos(p - out.galley_pos);
+                        link_at = Some(f.text.char_indices().nth(c.index.0).map(|(b, _)| b).unwrap_or(f.text.len()));
                     }
-                });
-                ui.add_space(40.0);
+                }
             });
+            ui.add_space(40.0);
+        });
         let now_t = ctx.input(|x| x.time);
         if let Some(line_start) = clicked_box {
             if Self::toggle_todo_at_line(&mut f.text, line_start) {
@@ -913,7 +1001,9 @@ impl GrassApp {
                     let _ = crate::platform::open_path(&p);
                 }
                 LinkAction::Ask(req) => self.pending_open = Some(req),
-                LinkAction::Unsupported => self.notify(&ctx, trf("Ce type de lien n'est pas pris en charge : {0}", &[("0", &target)])),
+                LinkAction::Unsupported => {
+                    self.notify(&ctx, trf("Ce type de lien n'est pas pris en charge : {0}", &[("0", &target)]))
+                }
                 LinkAction::Nothing => {}
             }
         }
@@ -1019,7 +1109,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("gf-mdfile-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("Lisez-moi.md");
-        std::fs::write(&p, "# Titre\r\n\r\nVoir [l'autre](Autre%20page.md) et ![plan](img/plan.png \"Plan\")\r\n").unwrap();
+        std::fs::write(&p, "# Titre\r\n\r\nVoir [l'autre](Autre%20page.md) et ![plan](img/plan.png \"Plan\")\r\n")
+            .unwrap();
         std::fs::write(dir.join("Autre page.md"), "# Autre\n").unwrap();
         let mut f = OpenFile::open(&p, 1).unwrap();
         assert!(!f.text.contains('\r'), "Windows line endings are normalised");
@@ -1084,13 +1175,17 @@ mod tests {
         // an extended attribute (where the file system supports them)
         let name = std::ffi::CString::new("user.grassfield.test").unwrap();
         let cpath = std::ffi::CString::new(p.to_str().unwrap()).unwrap();
-        let has_xattr = unsafe { libc::setxattr(cpath.as_ptr(), name.as_ptr(), b"kept".as_ptr() as *const libc::c_void, 4, 0) } == 0;
+        let has_xattr =
+            unsafe { libc::setxattr(cpath.as_ptr(), name.as_ptr(), b"kept".as_ptr() as *const libc::c_void, 4, 0) }
+                == 0;
         let mut f = OpenFile::open(&p, 1).unwrap();
         f.text = "v2".into();
         f.save().unwrap();
         if has_xattr {
             let mut buf = [0u8; 16];
-            let n = unsafe { libc::getxattr(cpath.as_ptr(), name.as_ptr(), buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+            let n = unsafe {
+                libc::getxattr(cpath.as_ptr(), name.as_ptr(), buf.as_mut_ptr() as *mut libc::c_void, buf.len())
+            };
             assert_eq!(&buf[..n.max(0) as usize], b"kept", "extended attribute lost");
         }
         // now the folder cannot be written: the save goes in place
@@ -1103,7 +1198,11 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "v3, longer than before");
         assert_eq!(std::fs::metadata(&p).unwrap().ino(), ino, "written in place");
         let backups = base.join("data").join("backups");
-        assert_eq!(std::fs::read_dir(&backups).map(|r| r.count()).unwrap_or(0), 0, "the backup is removed after a good save");
+        assert_eq!(
+            std::fs::read_dir(&backups).map(|r| r.count()).unwrap_or(0),
+            0,
+            "the backup is removed after a good save"
+        );
         f.text = "v4".into();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
         let res = f.save();
@@ -1149,7 +1248,10 @@ mod tests {
         let base = dir.canonicalize().unwrap();
         assert_eq!(link_action(&base, "autre.md"), LinkAction::OpenHere(base.join("autre.md")));
         assert_eq!(link_action(&base, "sous/photo.png"), LinkAction::OpenPicture(base.join("sous/photo.png")));
-        assert_eq!(link_action(&base, "https://example.org/x"), LinkAction::Ask(OpenRequest::Link("https://example.org/x".into())));
+        assert_eq!(
+            link_action(&base, "https://example.org/x"),
+            LinkAction::Ask(OpenRequest::Link("https://example.org/x".into()))
+        );
         assert_eq!(link_action(&base, "mailto:a@b.c"), LinkAction::Ask(OpenRequest::Link("mailto:a@b.c".into())));
         assert_eq!(link_action(&base, "javascript:alert(1)"), LinkAction::Unsupported);
         assert_eq!(link_action(&base, "file:///etc/passwd"), LinkAction::Unsupported);
@@ -1190,5 +1292,4 @@ mod tests {
         // returns at once with an error instead of waiting for a writer
         assert!(OpenFile::open(&p, 1).is_err());
     }
-
 }

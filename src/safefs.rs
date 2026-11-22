@@ -248,7 +248,8 @@ fn copy_xattrs(from: &File, to: &File) -> bool {
             }
             let mut value = vec![0u8; size as usize];
             let size = libc::fgetxattr(src, cname.as_ptr(), value.as_mut_ptr() as *mut libc::c_void, value.len());
-            let ok = size >= 0 && libc::fsetxattr(dst, cname.as_ptr(), value.as_ptr() as *const libc::c_void, size as usize, 0) == 0;
+            let ok = size >= 0
+                && libc::fsetxattr(dst, cname.as_ptr(), value.as_ptr() as *const libc::c_void, size as usize, 0) == 0;
             if !ok && matters {
                 return false;
             }
@@ -357,7 +358,8 @@ fn write_in_place(path: &Path, meta: &std::fs::Metadata, bytes: &[u8], backups: 
     let old = read_regular(path, Links::Refuse, 1 << 30)?;
     write_new(&backup, &old, 0o600)?;
     let done = (|| -> std::io::Result<()> {
-        let mut f = std::fs::OpenOptions::new().write(true).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(path)?;
+        let mut f =
+            std::fs::OpenOptions::new().write(true).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(path)?;
         let now = f.metadata()?;
         // still the same regular file that was checked
         if !now.is_file() || now.ino() != meta.ino() || now.dev() != meta.dev() {

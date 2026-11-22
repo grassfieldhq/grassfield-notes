@@ -54,7 +54,8 @@ impl FilePicker {
                 Purpose::Import | Purpose::OpenFile => crate::i18n::tr("Fichiers Markdown").to_string(),
                 _ => crate::i18n::tr("Images ou PDF").to_string(),
             };
-            let ask = crate::portal::Ask::Open { multiple: purpose != Purpose::OpenFile, filter: (label, self.exts.clone()) };
+            let ask =
+                crate::portal::Ask::Open { multiple: purpose != Purpose::OpenFile, filter: (label, self.exts.clone()) };
             self.panel = Some(crate::portal::ask(ctx, self.title().to_string(), ask, Some(self.dir.clone())));
         }
     }
@@ -98,10 +99,7 @@ impl FilePicker {
     }
 
     fn accepts(&self, p: &std::path::Path) -> bool {
-        p.extension()
-            .and_then(|e| e.to_str())
-            .map(|e| self.exts.contains(&e.to_lowercase().as_str()))
-            .unwrap_or(false)
+        p.extension().and_then(|e| e.to_str()).map(|e| self.exts.contains(&e.to_lowercase().as_str())).unwrap_or(false)
     }
 
     /// Draws the chooser over the window. Returns the chosen files once confirmed.
@@ -134,12 +132,14 @@ impl FilePicker {
         // (the app dims itself behind this window)
         let size = Vec2::new((screen.width() - 80.0).min(720.0), (screen.height() - 80.0).min(560.0));
         let title = self.title();
-        egui::Modal::new(egui::Id::unique("file-picker"))
-            .backdrop_color(Color32::from_black_alpha(120))
-            .show(ctx, |ui| {
+        egui::Modal::new(egui::Id::unique("file-picker")).backdrop_color(Color32::from_black_alpha(120)).show(
+            ctx,
+            |ui| {
                 ui.set_width(size.x);
                 ui.set_height(size.y);
-                ui.label(egui::RichText::new(title).font(FontId::new(18.0, FontFamily::Name("bold".into()))).color(t.text));
+                ui.label(
+                    egui::RichText::new(title).font(FontId::new(18.0, FontFamily::Name("bold".into()))).color(t.text),
+                );
                 ui.add_space(6.0);
                 // quick places
                 ui.horizontal_wrapped(|ui| {
@@ -182,7 +182,8 @@ impl FilePicker {
                         })
                         .collect(),
                     Err(e) => {
-                        self.error = Some(crate::i18n::trf("Dossier illisible : {e}", &[("e", &e as &dyn std::fmt::Display)]));
+                        self.error =
+                            Some(crate::i18n::trf("Dossier illisible : {e}", &[("e", &e as &dyn std::fmt::Display)]));
                         Vec::new()
                     }
                 };
@@ -206,13 +207,35 @@ impl FilePicker {
                             // small painted folder
                             let c = r.left_center() + Vec2::new(17.0, 1.0);
                             let body = egui::Rect::from_center_size(c, Vec2::new(16.0, 11.0));
-                            ui.painter().rect_filled(egui::Rect::from_min_size(body.min - Vec2::new(0.0, 3.0), Vec2::new(7.0, 4.0)), 1.5, t.accent);
+                            ui.painter().rect_filled(
+                                egui::Rect::from_min_size(body.min - Vec2::new(0.0, 3.0), Vec2::new(7.0, 4.0)),
+                                1.5,
+                                t.accent,
+                            );
                             ui.painter().rect_filled(body, 2.0, t.accent);
                         } else {
-                            let icon = if name.to_lowercase().ends_with(".pdf") { "PDF" } else if matches!(self.purpose, Purpose::Import | Purpose::OpenFile) { "MD" } else { "IMG" };
-                            ui.painter().text(r.left_center() + Vec2::new(17.0, 0.0), Align2::CENTER_CENTER, icon, FontId::new(9.0, FontFamily::Name("bold".into())), t.accent_text);
+                            let icon = if name.to_lowercase().ends_with(".pdf") {
+                                "PDF"
+                            } else if matches!(self.purpose, Purpose::Import | Purpose::OpenFile) {
+                                "MD"
+                            } else {
+                                "IMG"
+                            };
+                            ui.painter().text(
+                                r.left_center() + Vec2::new(17.0, 0.0),
+                                Align2::CENTER_CENTER,
+                                icon,
+                                FontId::new(9.0, FontFamily::Name("bold".into())),
+                                t.accent_text,
+                            );
                         }
-                        ui.painter().text(r.left_center() + Vec2::new(34.0, 0.0), Align2::LEFT_CENTER, &name, FontId::proportional(14.0), t.text);
+                        ui.painter().text(
+                            r.left_center() + Vec2::new(34.0, 0.0),
+                            Align2::LEFT_CENTER,
+                            &name,
+                            FontId::proportional(14.0),
+                            t.text,
+                        );
                         if resp.double_clicked() && !is_dir {
                             self.selected.insert(p.clone());
                             result = Some(self.selected.iter().cloned().collect());
@@ -232,16 +255,23 @@ impl FilePicker {
                 ui.horizontal(|ui| {
                     let hint = match self.purpose {
                         Purpose::Import => crate::i18n::tr("Fichiers .md ou .txt"),
-                        Purpose::OpenFile => crate::i18n::tr("Le fichier s'ouvre tel quel : vos modifications y sont enregistrées."),
+                        Purpose::OpenFile => {
+                            crate::i18n::tr("Le fichier s'ouvre tel quel : vos modifications y sont enregistrées.")
+                        }
                         _ => crate::i18n::tr("Images (photos, scans) ou PDF. Le texte sera lu pour la recherche."),
                     };
                     ui.label(egui::RichText::new(hint).size(12.0).color(t.muted));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let n = self.selected.len();
-                        let label = egui::RichText::new(crate::i18n::trf("Ajouter ({n})", &[("n", &n as &dyn std::fmt::Display)]))
-                            .font(FontId::new(14.0, FontFamily::Name("bold".into())))
-                            .color(if n > 0 { Color32::WHITE } else { t.muted });
-                        let b = egui::Button::new(label).fill(if n > 0 { t.accent } else { t.code_bg }).stroke(Stroke::NONE);
+                        let label = egui::RichText::new(crate::i18n::trf(
+                            "Ajouter ({n})",
+                            &[("n", &n as &dyn std::fmt::Display)],
+                        ))
+                        .font(FontId::new(14.0, FontFamily::Name("bold".into())))
+                        .color(if n > 0 { Color32::WHITE } else { t.muted });
+                        let b = egui::Button::new(label)
+                            .fill(if n > 0 { t.accent } else { t.code_bg })
+                            .stroke(Stroke::NONE);
                         if ui.add_enabled(n > 0, b).clicked() {
                             result = Some(self.selected.iter().cloned().collect());
                         }
@@ -250,7 +280,8 @@ impl FilePicker {
                         }
                     });
                 });
-            });
+            },
+        );
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.open = false;
         }

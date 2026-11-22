@@ -67,10 +67,33 @@ fn run(title: &str, ask: Ask, folder: Option<&Path>) -> Answer {
                 for ext in &filter.1 {
                     f = f.glob(&format!("*.{ext}"));
                 }
-                SelectedFiles::open_file().title(title).modal(true).multiple(multiple).filter(f).current_folder::<&Path>(folder)?.send().await?
+                SelectedFiles::open_file()
+                    .title(title)
+                    .modal(true)
+                    .multiple(multiple)
+                    .filter(f)
+                    .current_folder::<&Path>(folder)?
+                    .send()
+                    .await?
             }
-            Ask::Folder => SelectedFiles::open_file().title(title).modal(true).directory(true).current_folder::<&Path>(folder)?.send().await?,
-            Ask::Save { name } => SelectedFiles::save_file().title(title).modal(true).current_name(name.as_str()).current_folder::<&Path>(folder)?.send().await?,
+            Ask::Folder => {
+                SelectedFiles::open_file()
+                    .title(title)
+                    .modal(true)
+                    .directory(true)
+                    .current_folder::<&Path>(folder)?
+                    .send()
+                    .await?
+            }
+            Ask::Save { name } => {
+                SelectedFiles::save_file()
+                    .title(title)
+                    .modal(true)
+                    .current_name(name.as_str())
+                    .current_folder::<&Path>(folder)?
+                    .send()
+                    .await?
+            }
         };
         request.response()
     };
@@ -102,7 +125,13 @@ async fn within<T>(limit: std::time::Duration, fut: impl std::future::Future<Out
 #[cfg(target_os = "linux")]
 async fn filechooser_version() -> ashpd::zbus::Result<u32> {
     let conn = ashpd::zbus::Connection::session().await?;
-    let proxy = ashpd::zbus::Proxy::new(&conn, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop", "org.freedesktop.portal.FileChooser").await?;
+    let proxy = ashpd::zbus::Proxy::new(
+        &conn,
+        "org.freedesktop.portal.Desktop",
+        "/org/freedesktop/portal/desktop",
+        "org.freedesktop.portal.FileChooser",
+    )
+    .await?;
     proxy.get_property::<u32>("version").await
 }
 
@@ -149,7 +178,8 @@ mod tests {
     #[test]
     fn a_portal_that_never_answers_is_given_up() {
         let t = std::time::Instant::now();
-        let never = async_io::block_on(within(std::time::Duration::from_millis(200), std::future::pending::<Option<u8>>()));
+        let never =
+            async_io::block_on(within(std::time::Duration::from_millis(200), std::future::pending::<Option<u8>>()));
         assert_eq!(never, None);
         assert!(t.elapsed() < std::time::Duration::from_secs(5));
         let quick = async_io::block_on(within(std::time::Duration::from_secs(5), async { Some(7) }));

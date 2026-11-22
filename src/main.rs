@@ -9,17 +9,17 @@ mod filepicker;
 mod fonts;
 mod i18n;
 mod icons;
+mod markdown;
+mod model;
 mod platform;
 mod portal;
 mod safefs;
 mod secrets;
 mod sketch;
 mod sync;
-mod markdown;
-mod model;
-mod theme;
 #[cfg(test)]
 mod tests;
+mod theme;
 
 use eframe::egui;
 use std::path::PathBuf;
@@ -29,22 +29,12 @@ use fonts::find_font;
 
 fn setup_fonts(ctx: &egui::Context) {
     let mut defs = egui::FontDefinitions::default();
-    let defaults = defs
-        .families
-        .get(&egui::FontFamily::Proportional)
-        .cloned()
-        .unwrap_or_default();
-    let mono_defaults = defs
-        .families
-        .get(&egui::FontFamily::Monospace)
-        .cloned()
-        .unwrap_or_default();
+    let defaults = defs.families.get(&egui::FontFamily::Proportional).cloned().unwrap_or_default();
+    let mono_defaults = defs.families.get(&egui::FontFamily::Monospace).cloned().unwrap_or_default();
 
     let mut add = |key: &str, names: &[&str]| -> bool {
         if let Some(bytes) = find_font(names) {
-            defs
-                .font_data
-                .insert(key.to_string(), Arc::new(egui::FontData::from_owned(bytes)));
+            defs.font_data.insert(key.to_string(), Arc::new(egui::FontData::from_owned(bytes)));
             true
         } else {
             false
@@ -62,13 +52,9 @@ fn setup_fonts(ctx: &egui::Context) {
         v
     };
     let reg_key = regular.then_some("gf-regular");
-    defs
-        .families
-        .insert(egui::FontFamily::Proportional, with(reg_key, &defaults));
-    defs.families.insert(
-        egui::FontFamily::Name("bold".into()),
-        with(if bold { Some("gf-bold") } else { reg_key }, &defaults),
-    );
+    defs.families.insert(egui::FontFamily::Proportional, with(reg_key, &defaults));
+    defs.families
+        .insert(egui::FontFamily::Name("bold".into()), with(if bold { Some("gf-bold") } else { reg_key }, &defaults));
     defs.families.insert(
         egui::FontFamily::Name("italic".into()),
         with(if italic { Some("gf-italic") } else { reg_key }, &defaults),

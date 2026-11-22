@@ -112,7 +112,8 @@ fn executable(_: &Path) -> bool {
 pub fn opens_safely(path: &Path, links: crate::safefs::Links) -> bool {
     let Some(kind) = kind_of(path, links) else { return false };
     let ext = path.extension().and_then(|e| e.to_str()).map(|e| e.to_lowercase()).unwrap_or_default();
-    let named_alike = if kind == Kind::Pdf { DOC_EXT.contains(&ext.as_str()) } else { IMAGE_EXT.contains(&ext.as_str()) };
+    let named_alike =
+        if kind == Kind::Pdf { DOC_EXT.contains(&ext.as_str()) } else { IMAGE_EXT.contains(&ext.as_str()) };
     named_alike && !executable(path)
 }
 
@@ -147,7 +148,10 @@ pub fn path_of(note_id: u64, a: &Attachment) -> PathBuf {
 /// Only regular files of bounded size whose content is a picture or a PDF are accepted.
 pub fn store(note_id: u64, src: &Path) -> std::io::Result<Attachment> {
     if kind_of(src, crate::safefs::Links::Follow).is_none() {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, crate::i18n::tr("ce n'est ni une image ni un PDF")));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            crate::i18n::tr("ce n'est ni une image ni un PDF"),
+        ));
     }
     let dir = Library::attachment_dir(note_id);
     std::fs::create_dir_all(&dir)?;
@@ -167,7 +171,8 @@ pub fn store(note_id: u64, src: &Path) -> std::io::Result<Attachment> {
 }
 
 fn has_tool(name: &str) -> bool {
-    crate::platform::command(name).arg("-v").output().is_ok() || crate::platform::command(name).arg("--version").output().is_ok()
+    crate::platform::command(name).arg("-v").output().is_ok()
+        || crate::platform::command(name).arg("--version").output().is_ok()
 }
 
 /// Which text readers are installed on this computer.
@@ -402,7 +407,18 @@ impl Thumbs {
             let small = img.thumbnail(1000, 1000).to_rgba8();
             let size = [small.width() as usize, small.height() as usize];
             let ci = egui::ColorImage::from_rgba_unmultiplied(size, small.as_raw());
-            ctx.load_texture(format!("thumb-{note_id}-{}-{}", a.name, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)), ci, egui::TextureOptions::LINEAR)
+            ctx.load_texture(
+                format!(
+                    "thumb-{note_id}-{}-{}",
+                    a.name,
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos())
+                        .unwrap_or(0)
+                ),
+                ci,
+                egui::TextureOptions::LINEAR,
+            )
         });
         self.map.insert(key, tex.clone());
         tex
@@ -449,7 +465,11 @@ mod tests {
         let mut lib = Library::default();
         let id = lib.new_note("# docs".into());
         for k in 0..5 {
-            lib.get_mut(id).unwrap().attachments.push(Attachment { name: format!("missing-{k}.png"), text: String::new(), read: false });
+            lib.get_mut(id).unwrap().attachments.push(Attachment {
+                name: format!("missing-{k}.png"),
+                text: String::new(),
+                read: false,
+            });
         }
         let ctx = egui::Context::default();
         let mut r = Reader::default();
