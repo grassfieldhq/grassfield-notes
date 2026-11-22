@@ -563,9 +563,11 @@ mod tests {
     fn legacy_clipboard_keys_map_as_in_gtk_and_qt() {
         let shift = Modifiers::SHIFT;
         let ctrl = Modifiers::COMMAND;
-        assert_eq!(legacy_clipboard_command(Key::Insert, shift), Some(EditCommand::Paste));
-        assert_eq!(legacy_clipboard_command(Key::Insert, ctrl), Some(EditCommand::Copy));
-        assert_eq!(legacy_clipboard_command(Key::Delete, shift), Some(EditCommand::Cut));
+        // on Windows egui-winit maps these keys itself (is_paste_command & co.), so this mapping stays off there
+        let on = |cmd| if cfg!(target_os = "windows") { None } else { Some(cmd) };
+        assert_eq!(legacy_clipboard_command(Key::Insert, shift), on(EditCommand::Paste));
+        assert_eq!(legacy_clipboard_command(Key::Insert, ctrl), on(EditCommand::Copy));
+        assert_eq!(legacy_clipboard_command(Key::Delete, shift), on(EditCommand::Cut));
         // plain Delete and Insert, and other chords, stay keys
         assert_eq!(legacy_clipboard_command(Key::Delete, Modifiers::NONE), None);
         assert_eq!(legacy_clipboard_command(Key::Delete, ctrl), None);
