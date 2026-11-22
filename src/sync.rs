@@ -206,7 +206,10 @@ fn git_command(dir: &Path, args: &[&str], auth: &Auth) -> std::process::Command 
     let mut c = crate::platform::command("git");
     c.current_dir(dir)
         // a link committed to the repository is checked out as a plain file, never as a link
-        .args(["-c", "core.symlinks=false"]);
+        .args(["-c", "core.symlinks=false"])
+        // note files are written and read byte for byte: no line-ending conversion (Git for Windows turns
+        // core.autocrlf on by default, which checked them out with CRLF)
+        .args(["-c", "core.autocrlf=false", "-c", "core.eol=lf"]);
     c.env_remove(OLD_TOKEN_ENV).env_remove(TOKEN_FILE_ENV);
     // only the steps that talk to the server may sign in, and only through the file
     let network = matches!(args.first(), Some(&"fetch") | Some(&"push"));
@@ -304,6 +307,14 @@ fn safe_branch(b: &str) -> bool {
 }
 
 pub fn from_file(s: &str) -> Option<Note> {
+    // a file a git with core.autocrlf checked out earlier (Windows) has CRLF line ends
+    let lf;
+    let s = if s.starts_with("---\r\n") {
+        lf = s.replace("\r\n", "\n");
+        lf.as_str()
+    } else {
+        s
+    };
     let rest = s.strip_prefix("---\n")?;
     let end = rest.find("\n---\n")?;
     let header = &rest[..end];
@@ -660,6 +671,30 @@ pub fn apply(lib: &mut Library, m: Merge) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn note_files_checked_out_with_crlf_are_read() {
+        // what a git with core.autocrlf=true (Git for Windows' default) leaves in the working tree
+        let note = Note {
+            id: 7,
+            text: "# Titre\nligne deux".into(),
+            created: 1,
+            modified: 2,
+            pinned: true,
+            archived: false,
+            trashed: false,
+            attachments: vec![],
+        };
+        let crlf = to_file(&note).replace('\n', "\r\n");
+        let back = from_file(&crlf).expect("a CRLF note file is read");
+        assert_eq!((back.id, back.created, back.modified, back.pinned), (7, 1, 2, true));
+        assert_eq!(back.text, "# Titre\nligne deux");
+        // and git never converts them in the first place
+        let cmd =
+            git_command(Path::new("."), &["status"], &Auth { token: String::new(), host: String::new(), file: None });
+        let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert!(args.windows(2).any(|w| w == ["-c", "core.autocrlf=false"]), "{args:?}");
+    }
 
     #[test]
     fn the_token_never_reaches_the_command_line() {
