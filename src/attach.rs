@@ -207,8 +207,8 @@ fn ocr_lang() -> String {
 
 /// Text readers run at most this long per document.
 const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
-/// Memory a text reader may use (address space).
-#[cfg(unix)]
+/// Memory a text reader may use (address space; not on macOS, which has no such limit).
+#[cfg(all(unix, not(target_os = "macos")))]
 const READ_MEMORY: u64 = 1536 * 1024 * 1024;
 /// Most text kept from one document.
 const MAX_TEXT_BYTES: u64 = 4 * 1024 * 1024;
@@ -231,6 +231,9 @@ fn limit_child(cmd: &mut std::process::Command) {
                 }
                 Ok(())
             };
+            // macOS does not support an address-space limit (setrlimit fails), and failing here would stop every
+            // reader from starting: there the CPU, file-size and core limits and the timeout still hold
+            #[cfg(not(target_os = "macos"))]
             set(libc::RLIMIT_AS, READ_MEMORY)?;
             set(libc::RLIMIT_CPU, cpu)?;
             // the readers only write to a pipe: no file of any size
@@ -457,6 +460,7 @@ mod tests {
         let out = run_reader(cmd).unwrap();
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines[0], READ_TIMEOUT.as_secs().to_string(), "CPU limit");
+        #[cfg(not(target_os = "macos"))]
         assert_eq!(lines[1], (READ_MEMORY / 1024).to_string(), "memory limit");
         assert_eq!(lines[2], "0", "no file writes");
     }
