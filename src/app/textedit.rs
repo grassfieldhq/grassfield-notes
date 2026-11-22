@@ -104,8 +104,20 @@ pub(super) fn context_menu(
     selection: Option<(usize, usize)>,
     text: &str,
 ) {
+    let menu_selection = id.with("gf-menu-selection");
+    if resp.secondary_clicked() {
+        // the selection the menu acts on, as it was when the menu opened
+        resp.ctx.data_mut(|d| d.insert_temp(menu_selection, selection));
+    }
     resp.context_menu(|ui| {
         ui.set_min_width(190.0);
+        let selection = ui.data(|d| d.get_temp::<Option<(usize, usize)>>(menu_selection)).flatten().or(selection);
+        // egui collapses the selection of a text field that is not focused; the field keeps the focus while its
+        // menu is open, so its selection stays visible and the command finds it.
+        if !ui.memory(|m| m.has_focus(id)) {
+            restore_selection(ui.ctx(), id, selection);
+            ui.memory_mut(|m| m.request_focus(id));
+        }
         let len = text.chars().count();
         let has_selection = matches!(selection, Some((a, b)) if a < b);
         for (i, (cmd, enabled)) in menu_items(editable, has_selection, len > 0).into_iter().enumerate() {
@@ -115,11 +127,21 @@ pub(super) fn context_menu(
             let shortcut = ui.ctx().format_shortcut(&cmd.shortcut());
             let button = egui::Button::new(cmd.label()).shortcut_text(shortcut);
             if ui.add_enabled(enabled, button).clicked() {
+                restore_selection(ui.ctx(), id, selection);
                 run(ui.ctx(), id, cmd, len);
                 ui.close();
             }
         }
     });
+}
+
+/// Put `selection` (sorted char range) back into the field's saved state.
+fn restore_selection(ctx: &egui::Context, id: Id, selection: Option<(usize, usize)>) {
+    if let Some((a, b)) = selection {
+        let mut state = TextEditState::load(ctx, id).unwrap_or_default();
+        state.cursor.set_char_range(Some(CCursorRange::two(CCursor::new(a), CCursor::new(b))));
+        state.store(ctx, id);
+    }
 }
 
 /// Run a menu command on the field `id`. Clicking the menu took the keyboard focus from the field; it gets it back
@@ -128,11 +150,7 @@ pub(super) fn run(ctx: &egui::Context, id: Id, cmd: EditCommand, len: usize) {
     ctx.memory_mut(|m| m.request_focus(id));
     match cmd.viewport_command() {
         Some(command) => ctx.send_viewport_cmd(command),
-        None => {
-            let mut state = TextEditState::load(ctx, id).unwrap_or_default();
-            state.cursor.set_char_range(Some(CCursorRange::two(CCursor::new(0), CCursor::new(len))));
-            state.store(ctx, id);
-        }
+        None => restore_selection(ctx, id, Some((0, len))),
     }
     ctx.request_repaint();
 }
@@ -299,6 +317,8 @@ impl GrassApp {
                 self.insert_image_ref(id, &name);
                 self.layout_cache = None;
                 self.mark_dirty(ctx);
+                // the picture's texture loads on the next frame: ask for it now, not at the next pointer move
+                ctx.request_repaint();
             }
             Err(e) => self
                 .notify(ctx, crate::i18n::trf("Image non enregistrée : {e}", &[("e", &e as &dyn std::fmt::Display)])),
