@@ -30,7 +30,7 @@ jobs:
           cp target/release/grassfield-notes README.md LICENSE CHANGELOG.md packaging/grassfield-notes.desktop "$name/"
           target/release/grassfield-notes --write-icon "$name/grassfield-notes.png"
           tar czf "$name.tar.gz" "$name"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: linux
           path: grassfield-notes-*.tar.gz
@@ -50,7 +50,7 @@ jobs:
           mkdir "$name"
           cp target/release/grassfield-notes.exe README.md LICENSE CHANGELOG.md "$name/"
           7z a "$name.zip" "$name" > /dev/null
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: windows
           path: grassfield-notes-*.zip
@@ -103,7 +103,7 @@ jobs:
           # ad-hoc signature so Apple Silicon Macs accept the binary (not notarised)
           codesign --force --deep --sign - "$app"
           ditto -c -k --keepParent "$app" "grassfield-notes-${GITHUB_REF_NAME}-macos-universal.zip"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: macos
           path: grassfield-notes-*.zip
