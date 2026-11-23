@@ -220,7 +220,8 @@ mod tests {
     #[test]
     fn sketches_from_elsewhere_stay_within_bounds() {
         // any size: clamped to the canvas, so saving never asks for a huge picture
-        let huge = Sketch { width: 1.0e9, height: 3.0e8, strokes: vec![stroke(vec![[1.0e12, -5.0], [10.0, 10.0]], 1.0e6)] };
+        let huge =
+            Sketch { width: 1.0e9, height: 3.0e8, strokes: vec![stroke(vec![[1.0e12, -5.0], [10.0, 10.0]], 1.0e6)] };
         let ok = huge.sanitized().unwrap();
         assert_eq!((ok.width, ok.height), (CANVAS_W, CANVAS_H));
         assert_eq!(ok.strokes[0].width, MAX_WIDTH);
@@ -230,10 +231,12 @@ mod tests {
         // too many points, or too much drawing work: refused
         let many = Sketch { strokes: vec![stroke(vec![[1.0, 1.0]; MAX_POINTS + 1], 2.0)], ..Default::default() };
         assert!(many.sanitized().is_none());
-        let diagonals: Vec<[f32; 2]> = (0..2000).map(|k| if k % 2 == 0 { [0.0, 0.0] } else { [CANVAS_W, CANVAS_H] }).collect();
+        let diagonals: Vec<[f32; 2]> =
+            (0..2000).map(|k| if k % 2 == 0 { [0.0, 0.0] } else { [CANVAS_W, CANVAS_H] }).collect();
         assert!(Sketch { strokes: vec![stroke(diagonals, 2.0)], ..Default::default() }.sanitized().is_none());
         // a hand-drawn sketch is kept as it is
-        let line: Vec<[f32; 2]> = (0..500).map(|k| [100.0 + k as f32, 200.0 + (k as f32 / 10.0).sin() * 30.0]).collect();
+        let line: Vec<[f32; 2]> =
+            (0..500).map(|k| [100.0 + k as f32, 200.0 + (k as f32 / 10.0).sin() * 30.0]).collect();
         let normal = Sketch { strokes: vec![stroke(line, 4.0); 40], ..Default::default() };
         assert_eq!(normal.clone().sanitized(), Some(normal));
     }

@@ -1,28 +1,28 @@
 //! The Grassfield Notes window: sidebar, note list, editor and info panel.
 
+mod attachments;
 mod editor;
 mod files;
-mod list;
-mod attachments;
 mod imageedit;
+mod list;
 mod overlay;
 mod panels;
 mod settings;
 mod sidebar;
 mod sketcher;
+mod textedit;
 
-use crate::markdown::{self, MdStyle};
-use crate::model::{
-    self, format_date, format_full_date, now, tag_spans, wiki_links, word_count, EditorFont, Filter,
-    Library, SortMode,
-};
 use crate::export::{self, Format};
 use crate::filepicker::{FilePicker, Purpose};
+use crate::markdown::{self, MdStyle};
+use crate::model::{
+    self, format_date, format_full_date, now, tag_spans, wiki_links, word_count, EditorFont, Filter, Library, SortMode,
+};
 use crate::theme::{self, Theme};
 use crate::{attach, icons, sync};
 use eframe::egui::{
-    self, Align, Align2, Color32, CornerRadius, FontFamily, FontId, Id, Key, KeyboardShortcut,
-    Layout, Margin, Modifiers, Pos2, Rect, Sense, Stroke, Vec2,
+    self, Align, Align2, Color32, CornerRadius, FontFamily, FontId, Id, Key, KeyboardShortcut, Layout, Margin,
+    Modifiers, Pos2, Rect, Sense, Stroke, Vec2,
 };
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -307,7 +307,8 @@ impl GrassApp {
                                 if let Some(src) = src {
                                     if let Ok(p) = export::export_note(&src, Format::Jpg, &tmp) {
                                         if let Ok(mut a) = attach::store(id, &p) {
-                                            a.text = crate::i18n::tr("Ce printemps, essayer une prairie fleurie").into();
+                                            a.text =
+                                                crate::i18n::tr("Ce printemps, essayer une prairie fleurie").into();
                                             a.read = true;
                                             let name = a.name.clone();
                                             app.lib.get_mut(id).unwrap().attachments.push(a);
@@ -328,7 +329,13 @@ impl GrassApp {
                             app.filter = Filter::Trash;
                             app.selected = None;
                         }
-                        "tag" => app.filter = Filter::Tag(if crate::i18n::lang() == crate::i18n::Lang::Fr { "travail".into() } else { "work".into() }),
+                        "tag" => {
+                            app.filter = Filter::Tag(if crate::i18n::lang() == crate::i18n::Lang::Fr {
+                                "travail".into()
+                            } else {
+                                "work".into()
+                            })
+                        }
                         _ => {}
                     }
                 }
@@ -352,7 +359,10 @@ impl GrassApp {
             return;
         }
         if let Err(e) = self.lib.save() {
-            self.toast = Some((crate::i18n::trf("Échec de l'enregistrement : {e}", &[("e", &e as &dyn std::fmt::Display)]), 0.0));
+            self.toast = Some((
+                crate::i18n::trf("Échec de l'enregistrement : {e}", &[("e", &e as &dyn std::fmt::Display)]),
+                0.0,
+            ));
         }
         self.dirty = false;
     }
@@ -425,7 +435,11 @@ impl GrassApp {
                 Action::TogglePin(id) => {
                     if let Some(n) = self.lib.get_mut(id) {
                         n.pinned = !n.pinned;
-                        let msg = if n.pinned { crate::i18n::tr("Note épinglée") } else { crate::i18n::tr("Note désépinglée") };
+                        let msg = if n.pinned {
+                            crate::i18n::tr("Note épinglée")
+                        } else {
+                            crate::i18n::tr("Note désépinglée")
+                        };
                         self.notify(ctx, msg);
                     }
                     self.mark_dirty(ctx);
@@ -433,7 +447,11 @@ impl GrassApp {
                 Action::ToggleArchive(id) => {
                     if let Some(n) = self.lib.get_mut(id) {
                         n.archived = !n.archived;
-                        let msg = if n.archived { crate::i18n::tr("Note archivée") } else { crate::i18n::tr("Note sortie des archives") };
+                        let msg = if n.archived {
+                            crate::i18n::tr("Note archivée")
+                        } else {
+                            crate::i18n::tr("Note sortie des archives")
+                        };
                         self.notify(ctx, msg);
                     }
                     self.reselect_if_hidden(id);
@@ -493,7 +511,13 @@ impl GrassApp {
                         Some(id) => id,
                         None => {
                             let id = self.lib.new_note(format!("# {title}\n\n"));
-                            self.notify(ctx, crate::i18n::trf("Nouvelle note « {title} » créée", &[("title", &title as &dyn std::fmt::Display)]));
+                            self.notify(
+                                ctx,
+                                crate::i18n::trf(
+                                    "Nouvelle note « {title} » créée",
+                                    &[("title", &title as &dyn std::fmt::Display)],
+                                ),
+                            );
                             self.mark_dirty(ctx);
                             id
                         }
@@ -511,7 +535,10 @@ impl GrassApp {
                     if self.filter == Filter::Trash {
                         self.selected = None;
                     }
-                    self.notify(ctx, crate::i18n::trf("{n} note(s) supprimée(s)", &[("n", &n as &dyn std::fmt::Display)]));
+                    self.notify(
+                        ctx,
+                        crate::i18n::trf("{n} note(s) supprimée(s)", &[("n", &n as &dyn std::fmt::Display)]),
+                    );
                     self.mark_dirty(ctx);
                 }
                 Action::ToggleTagExpanded(t) => {
@@ -526,7 +553,10 @@ impl GrassApp {
                     if self.filter == Filter::Tag(t.clone()) {
                         self.filter = Filter::All;
                     }
-                    self.notify(ctx, crate::i18n::trf("Tag #{t} retiré des notes", &[("t", &t as &dyn std::fmt::Display)]));
+                    self.notify(
+                        ctx,
+                        crate::i18n::trf("Tag #{t} retiré des notes", &[("t", &t as &dyn std::fmt::Display)]),
+                    );
                     self.mark_dirty(ctx);
                 }
                 Action::PickFiles(purpose) => self.picker.start(ctx, purpose),
@@ -536,7 +566,10 @@ impl GrassApp {
                         n.modified = now();
                     }
                     let _ = std::fs::remove_file(model::Library::attachment_dir(id).join(&name));
-                    self.notify(ctx, crate::i18n::trf("« {name} » retiré de la note", &[("name", &name as &dyn std::fmt::Display)]));
+                    self.notify(
+                        ctx,
+                        crate::i18n::trf("« {name} » retiré de la note", &[("name", &name as &dyn std::fmt::Display)]),
+                    );
                     self.mark_dirty(ctx);
                 }
                 Action::InsertAttachmentText(id, name) => {
@@ -545,7 +578,10 @@ impl GrassApp {
                             if !n.text.ends_with('\n') {
                                 n.text.push('\n');
                             }
-                            n.text.push_str(&crate::i18n::trf("\n> Texte de « {name} »\n\n{text}\n", &[("name", &name as &dyn std::fmt::Display), ("text", &text as &dyn std::fmt::Display)]));
+                            n.text.push_str(&crate::i18n::trf(
+                                "\n> Texte de « {name} »\n\n{text}\n",
+                                &[("name", &name as &dyn std::fmt::Display), ("text", &text as &dyn std::fmt::Display)],
+                            ));
                             n.modified = now();
                         }
                     }
@@ -587,10 +623,7 @@ impl GrassApp {
             text = format!("# \n\n#{t}");
         }
         let id = self.lib.new_note(text);
-        if matches!(
-            self.filter,
-            Filter::Trash | Filter::Archive | Filter::Untagged | Filter::Pinned | Filter::Todo
-        ) {
+        if matches!(self.filter, Filter::Trash | Filter::Archive | Filter::Untagged | Filter::Pinned | Filter::Todo) {
             self.filter = Filter::All;
         }
         self.query.clear();
@@ -601,10 +634,7 @@ impl GrassApp {
     }
 
     fn export_dir() -> PathBuf {
-        dirs::document_dir()
-            .or_else(dirs::home_dir)
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("Grassfield Notes")
+        dirs::document_dir().or_else(dirs::home_dir).unwrap_or_else(|| PathBuf::from(".")).join("Grassfield Notes")
     }
 
     /// Export notes: the system's Save panel picks the file (or the folder, for several
@@ -645,17 +675,28 @@ impl GrassApp {
             (ExportTarget::Notes(ids), crate::portal::Answer::Files(paths)) => {
                 let Some(path) = paths.into_iter().next() else { return };
                 if ids.len() == 1 {
-                    let res = self.lib.get(ids[0]).map(|n| export::export_note_at(n, format, &path, &Library::attachment_dir(n.id)));
+                    let res = self
+                        .lib
+                        .get(ids[0])
+                        .map(|n| export::export_note_at(n, format, &path, &Library::attachment_dir(n.id)));
                     match res {
-                        Some(Ok(p)) => self.notify(ctx, crate::i18n::trf("Exporté : {0}", &[("0", &p.display() as &dyn std::fmt::Display)])),
-                        Some(Err(e)) => self.notify(ctx, crate::i18n::trf("Export impossible : {e}", &[("e", &e as &dyn std::fmt::Display)])),
+                        Some(Ok(p)) => self.notify(
+                            ctx,
+                            crate::i18n::trf("Exporté : {0}", &[("0", &p.display() as &dyn std::fmt::Display)]),
+                        ),
+                        Some(Err(e)) => self.notify(
+                            ctx,
+                            crate::i18n::trf("Export impossible : {e}", &[("e", &e as &dyn std::fmt::Display)]),
+                        ),
                         None => {}
                     }
                 } else {
                     self.export_to_folder(ctx, &ids, format, path);
                 }
             }
-            (ExportTarget::Notes(ids), crate::portal::Answer::Unavailable) => self.export_to_folder(ctx, &ids, format, Self::export_dir()),
+            (ExportTarget::Notes(ids), crate::portal::Answer::Unavailable) => {
+                self.export_to_folder(ctx, &ids, format, Self::export_dir())
+            }
             (ExportTarget::File(uid), answer) => {
                 let Some(i) = self.files.iter().position(|f| f.uid() == uid) else { return };
                 let at = match answer {
@@ -678,8 +719,20 @@ impl GrassApp {
             }
         }
         match last_err {
-            Some(e) if count == 0 => self.notify(ctx, crate::i18n::trf("Export impossible : {e}", &[("e", &e as &dyn std::fmt::Display)])),
-            _ => self.notify(ctx, crate::i18n::trf("{count} note(s) exportée(s) en {0} dans {1}", &[("0", &format.ext().to_uppercase() as &dyn std::fmt::Display), ("1", &dir.display() as &dyn std::fmt::Display), ("count", &count as &dyn std::fmt::Display)])),
+            Some(e) if count == 0 => {
+                self.notify(ctx, crate::i18n::trf("Export impossible : {e}", &[("e", &e as &dyn std::fmt::Display)]))
+            }
+            _ => self.notify(
+                ctx,
+                crate::i18n::trf(
+                    "{count} note(s) exportée(s) en {0} dans {1}",
+                    &[
+                        ("0", &format.ext().to_uppercase() as &dyn std::fmt::Display),
+                        ("1", &dir.display() as &dyn std::fmt::Display),
+                        ("count", &count as &dyn std::fmt::Display),
+                    ],
+                ),
+            ),
         }
     }
 
@@ -712,7 +765,10 @@ impl GrassApp {
                 (Purpose::Attach, Some(n)) => n.id,
                 _ => {
                     let date = chrono::Local::now().format("%d/%m/%Y %H:%M");
-                    self.lib.new_note(crate::i18n::trf("# Document numérisé du {date}\n\n#documents\n", &[("date", &date as &dyn std::fmt::Display)]))
+                    self.lib.new_note(crate::i18n::trf(
+                        "# Document numérisé du {date}\n\n#documents\n",
+                        &[("date", &date as &dyn std::fmt::Display)],
+                    ))
                 }
             };
             for p in docs {
@@ -728,7 +784,13 @@ impl GrassApp {
                         }
                         attached += 1;
                     }
-                    Err(e) => self.notify(ctx, crate::i18n::trf("Impossible de joindre {0} : {e}", &[("0", &p.display() as &dyn std::fmt::Display), ("e", &e as &dyn std::fmt::Display)])),
+                    Err(e) => self.notify(
+                        ctx,
+                        crate::i18n::trf(
+                            "Impossible de joindre {0} : {e}",
+                            &[("0", &p.display() as &dyn std::fmt::Display), ("e", &e as &dyn std::fmt::Display)],
+                        ),
+                    ),
                 }
             }
             last = Some(target);
@@ -746,7 +808,10 @@ impl GrassApp {
             let mut msg = match (notes_made, attached) {
                 (n, 0) => crate::i18n::trf("{n} note(s) importée(s)", &[("n", &n as &dyn std::fmt::Display)]),
                 (0, a) => crate::i18n::trf("{a} document(s) ajouté(s)", &[("a", &a as &dyn std::fmt::Display)]),
-                (n, a) => crate::i18n::trf("{n} note(s) importée(s), {a} document(s) ajouté(s)", &[("n", &n as &dyn std::fmt::Display), ("a", &a as &dyn std::fmt::Display)]),
+                (n, a) => crate::i18n::trf(
+                    "{n} note(s) importée(s), {a} document(s) ajouté(s)",
+                    &[("n", &n as &dyn std::fmt::Display), ("a", &a as &dyn std::fmt::Display)],
+                ),
             };
             if attached > 0 {
                 if tools.ocr || tools.pdf {
@@ -777,7 +842,9 @@ impl GrassApp {
         }
         match self.active_file.filter(|_| !self.show_settings) {
             Some(i) => {
-                let (pics, other): (Vec<PathBuf>, Vec<PathBuf>) = rest.into_iter().partition(|p| attach::is_attachable(p) && !p.to_string_lossy().to_lowercase().ends_with(".pdf"));
+                let (pics, other): (Vec<PathBuf>, Vec<PathBuf>) = rest
+                    .into_iter()
+                    .partition(|p| attach::is_attachable(p) && !p.to_string_lossy().to_lowercase().ends_with(".pdf"));
                 self.add_pictures_to_file(ctx, i, pics);
                 if !other.is_empty() {
                     self.add_files(ctx, other, Purpose::Attach);
@@ -840,7 +907,9 @@ impl GrassApp {
                 s.token_in_keyring = false;
                 (true, crate::i18n::tr("Jeton retiré du trousseau du système").to_string())
             }
-            (SecretOp::Forget, Err(e)) => (false, crate::i18n::trf("Le jeton n'a pas pu être retiré du trousseau du système : {e}", &[("e", &e)])),
+            (SecretOp::Forget, Err(e)) => {
+                (false, crate::i18n::trf("Le jeton n'a pas pu être retiré du trousseau du système : {e}", &[("e", &e)]))
+            }
         });
         self.mark_dirty(ctx);
     }
@@ -894,7 +963,9 @@ impl GrassApp {
     fn apply_icon(&mut self, ctx: &egui::Context) {
         if self.icon_textures.is_empty() {
             self.icon_textures = (0..icons::ICONS.len())
-                .map(|i| ctx.load_texture(format!("app-icon-{i}"), icons::color_image(i, 96), egui::TextureOptions::LINEAR))
+                .map(|i| {
+                    ctx.load_texture(format!("app-icon-{i}"), icons::color_image(i, 96), egui::TextureOptions::LINEAR)
+                })
                 .collect();
         }
         let i = self.lib.settings.icon % icons::ICONS.len();
@@ -907,6 +978,8 @@ impl GrassApp {
     // ------------------------------------------------------------------ shortcuts
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
+        // Shift+Insert, Ctrl+Insert and Shift+Delete: the clipboard keys GTK and Qt honour (and the Emoji panel sends)
+        textedit::legacy_clipboard_keys(ctx);
         let cmd = Modifiers::COMMAND;
         let cmd_shift = Modifiers::COMMAND | Modifiers::SHIFT;
         let mut new = false;
@@ -1022,9 +1095,7 @@ impl eframe::App for GrassApp {
                 .show(ui, |ui| self.settings_screen(ui));
         } else if self.active_file.is_some() {
             // a Markdown file opened on its own takes the whole window
-            egui::CentralPanel::default()
-                .frame(egui::Frame::new().fill(t.editor_bg))
-                .show(ui, |ui| self.file_view(ui));
+            egui::CentralPanel::default().frame(egui::Frame::new().fill(t.editor_bg)).show(ui, |ui| self.file_view(ui));
         } else {
             if self.other_instance {
                 egui::Panel::top("readonly-banner")
@@ -1057,9 +1128,7 @@ impl eframe::App for GrassApp {
                     .size_range(220.0..=380.0)
                     .show(ui, |ui| self.info_panel(ui));
             }
-            egui::CentralPanel::default()
-                .frame(egui::Frame::new().fill(t.editor_bg))
-                .show(ui, |ui| self.editor(ui));
+            egui::CentralPanel::default().frame(egui::Frame::new().fill(t.editor_bg)).show(ui, |ui| self.editor(ui));
         }
 
         self.sketch_window(&ctx);
@@ -1134,4 +1203,3 @@ mod instance_lock {
         }
     }
 }
-

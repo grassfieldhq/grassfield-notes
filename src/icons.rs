@@ -13,7 +13,13 @@ pub const ICONS: [IconStyle; 15] = [
     IconStyle { name: "Prairie", bg: [0x5C, 0xAE, 0x62], bg2: [0x3B, 0x85, 0x41], mark: [255, 255, 255], shape: 1 },
     IconStyle { name: "Mousse", bg: [0x2F, 0x45, 0x34], bg2: [0x1D, 0x2C, 0x21], mark: [0x9F, 0xE0, 0xA0], shape: 1 },
     IconStyle { name: "Menthe", bg: [0x7D, 0xD8, 0xB4], bg2: [0x3F, 0xB0, 0x88], mark: [255, 255, 255], shape: 0 },
-    IconStyle { name: "Tournesol", bg: [0xF6, 0xC8, 0x4C], bg2: [0xE0, 0x96, 0x1A], mark: [0x4A, 0x32, 0x0A], shape: 1 },
+    IconStyle {
+        name: "Tournesol",
+        bg: [0xF6, 0xC8, 0x4C],
+        bg2: [0xE0, 0x96, 0x1A],
+        mark: [0x4A, 0x32, 0x0A],
+        shape: 1,
+    },
     IconStyle { name: "Ciel", bg: [0x7C, 0xB8, 0xF0], bg2: [0x3A, 0x86, 0xD4], mark: [255, 255, 255], shape: 2 },
     IconStyle { name: "Lavande", bg: [0xB5, 0xA3, 0xEC], bg2: [0x7A, 0x63, 0xC9], mark: [255, 255, 255], shape: 1 },
     IconStyle { name: "Corail", bg: [0xF5, 0x8E, 0x76], bg2: [0xD8, 0x60, 0x4A], mark: [255, 255, 255], shape: 0 },
@@ -47,11 +53,7 @@ pub fn rgba(i: usize, size: u32) -> Vec<u8> {
     };
     let inset = s * 0.04;
     // three grass blades, in units of the icon size
-    let blades = [
-        (0.40, 0.70, 0.32, 0.40),
-        (0.50, 0.72, 0.50, 0.28),
-        (0.60, 0.70, 0.69, 0.42),
-    ];
+    let blades = [(0.40, 0.70, 0.32, 0.40), (0.50, 0.72, 0.50, 0.28), (0.60, 0.70, 0.69, 0.42)];
     let bw = s * 0.045;
     for y in 0..size {
         for x in 0..size {

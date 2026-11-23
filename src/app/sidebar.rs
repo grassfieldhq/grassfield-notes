@@ -28,11 +28,8 @@ impl GrassApp {
             FontId::proportional(14.0),
             icon_color,
         );
-        let label_font = if selected {
-            FontId::new(14.0, FontFamily::Name("bold".into()))
-        } else {
-            FontId::proportional(14.0)
-        };
+        let label_font =
+            if selected { FontId::new(14.0, FontFamily::Name("bold".into())) } else { FontId::proportional(14.0) };
         let galley = p.layout_no_wrap(label.to_string(), label_font, t.sidebar_text);
         let gpos = Pos2::new(rect.left() + 34.0 + indent, rect.center().y - galley.size().y / 2.0);
         let clipped = p.with_clip_rect(Rect::from_min_max(rect.min, Pos2::new(rect.right() - 34.0, rect.max.y)));
@@ -70,7 +67,12 @@ impl GrassApp {
             let (r, _) = ui.allocate_exact_size(Vec2::new(26.0, 26.0), Sense::hover());
             match self.icon_textures.get(self.lib.settings.icon % icons::ICONS.len()) {
                 Some(tex) => {
-                    ui.painter().image(tex.id(), r, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+                    ui.painter().image(
+                        tex.id(),
+                        r,
+                        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                        Color32::WHITE,
+                    );
                 }
                 None => Self::draw_logo(ui.painter(), r.center(), &t),
             }
@@ -125,7 +127,8 @@ impl GrassApp {
                         );
                     });
                     ui.add_space(4.0);
-                    let names: Vec<(usize, String)> = self.files.iter().enumerate().map(|(k, f)| (k, f.name())).collect();
+                    let names: Vec<(usize, String)> =
+                        self.files.iter().enumerate().map(|(k, f)| (k, f.name())).collect();
                     for (k, name) in names {
                         let resp = Self::sidebar_row(ui, &t, "📄", &name, None, false, 0.0);
                         if resp.clicked() {
@@ -147,7 +150,11 @@ impl GrassApp {
                 if tags.is_empty() {
                     ui.horizontal(|ui| {
                         ui.add_space(12.0);
-                        ui.label(egui::RichText::new(crate::i18n::tr("Tapez #tag dans une note")).size(12.5).color(t.sidebar_muted));
+                        ui.label(
+                            egui::RichText::new(crate::i18n::tr("Tapez #tag dans une note"))
+                                .size(12.5)
+                                .color(t.sidebar_muted),
+                        );
                     });
                 }
                 for tag in tags.iter() {
@@ -168,9 +175,8 @@ impl GrassApp {
                         continue;
                     }
                     let depth = parts.len() - 1;
-                    let has_children = tags
-                        .iter()
-                        .any(|o| o.starts_with(tag.as_str()) && o[tag.len()..].starts_with('/'));
+                    let has_children =
+                        tags.iter().any(|o| o.starts_with(tag.as_str()) && o[tag.len()..].starts_with('/'));
                     let name = parts.last().unwrap();
                     let f = Filter::Tag(tag.clone());
                     let count = self.lib.count(&f);
@@ -185,9 +191,17 @@ impl GrassApp {
                         let tri_resp = ui.interact(tri, Id::unique(("tri", tag)), Sense::click());
                         let c = tri.center();
                         let pts = if expanded {
-                            vec![Pos2::new(c.x - 4.0, c.y - 2.0), Pos2::new(c.x + 4.0, c.y - 2.0), Pos2::new(c.x, c.y + 3.0)]
+                            vec![
+                                Pos2::new(c.x - 4.0, c.y - 2.0),
+                                Pos2::new(c.x + 4.0, c.y - 2.0),
+                                Pos2::new(c.x, c.y + 3.0),
+                            ]
                         } else {
-                            vec![Pos2::new(c.x - 2.0, c.y - 4.0), Pos2::new(c.x - 2.0, c.y + 4.0), Pos2::new(c.x + 3.0, c.y)]
+                            vec![
+                                Pos2::new(c.x - 2.0, c.y - 4.0),
+                                Pos2::new(c.x - 2.0, c.y + 4.0),
+                                Pos2::new(c.x + 3.0, c.y),
+                            ]
                         };
                         ui.painter().add(egui::Shape::convex_polygon(pts, t.sidebar_muted, Stroke::NONE));
                         if tri_resp.clicked() || resp.double_clicked() {
@@ -217,7 +231,8 @@ impl GrassApp {
             ui.horizontal_centered(|ui| {
                 ui.add_space(4.0);
                 let b = ui.add(
-                    egui::Button::new(egui::RichText::new(crate::i18n::tr("⚙  Préférences")).color(t.sidebar_text)).frame(false),
+                    egui::Button::new(egui::RichText::new(crate::i18n::tr("⚙  Préférences")).color(t.sidebar_text))
+                        .frame(false),
                 );
                 if b.clicked() {
                     self.show_settings = !self.show_settings;

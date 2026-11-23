@@ -3,14 +3,8 @@
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-pub const REGULAR: &[&str] = &[
-    "NotoSans-Regular.ttf",
-    "LiberationSans-Regular.ttf",
-    "DejaVuSans.ttf",
-    "Arial.ttf",
-    "arial.ttf",
-    "segoeui.ttf",
-];
+pub const REGULAR: &[&str] =
+    &["NotoSans-Regular.ttf", "LiberationSans-Regular.ttf", "DejaVuSans.ttf", "Arial.ttf", "arial.ttf", "segoeui.ttf"];
 pub const BOLD: &[&str] = &[
     "NotoSans-Bold.ttf",
     "LiberationSans-Bold.ttf",
@@ -27,13 +21,8 @@ pub const ITALIC: &[&str] = &[
     "ariali.ttf",
     "segoeuii.ttf",
 ];
-pub const SERIF: &[&str] = &[
-    "NotoSerif-Regular.ttf",
-    "LiberationSerif-Regular.ttf",
-    "DejaVuSerif.ttf",
-    "Georgia.ttf",
-    "georgia.ttf",
-];
+pub const SERIF: &[&str] =
+    &["NotoSerif-Regular.ttf", "LiberationSerif-Regular.ttf", "DejaVuSerif.ttf", "Georgia.ttf", "georgia.ttf"];
 pub const MONO: &[&str] = &[
     "NotoSansMono-Regular.ttf",
     "LiberationMono-Regular.ttf",
@@ -110,9 +99,6 @@ fn epaint_fallback() -> &'static [u8] {
     static BYTES: OnceLock<Vec<u8>> = OnceLock::new();
     BYTES.get_or_init(|| {
         let defs = eframe::egui::FontDefinitions::default();
-        defs.font_data
-            .get("Ubuntu-Light")
-            .map(|d| (*d.font).as_ref().to_vec())
-            .unwrap_or_default()
+        defs.font_data.get("Ubuntu-Light").map(|d| (*d.font).as_ref().to_vec()).unwrap_or_default()
     })
 }

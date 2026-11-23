@@ -15,7 +15,9 @@ impl GrassApp {
             .show_separator_line(true)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    let back = egui::Button::new(egui::RichText::new(crate::i18n::tr("‹  Retour aux notes")).color(t.accent_text).size(14.0));
+                    let back = egui::Button::new(
+                        egui::RichText::new(crate::i18n::tr("‹  Retour aux notes")).color(t.accent_text).size(14.0),
+                    );
                     if ui.add(back).on_hover_text(crate::i18n::tr("Échap")).clicked() {
                         self.show_settings = false;
                     }
@@ -59,7 +61,11 @@ impl GrassApp {
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                     ui.set_max_width(820.0);
                     let title = pages.iter().find(|p| p.0 == self.settings_page).map(|p| p.2).unwrap_or("");
-                    ui.label(egui::RichText::new(title).font(FontId::new(22.0, FontFamily::Name("bold".into()))).color(t.text));
+                    ui.label(
+                        egui::RichText::new(title)
+                            .font(FontId::new(22.0, FontFamily::Name("bold".into())))
+                            .color(t.text),
+                    );
                     ui.add_space(12.0);
                     match self.settings_page {
                         SettingsPage::Language => changed |= self.page_language(ui, &t),
@@ -90,9 +96,18 @@ impl GrassApp {
 
     fn page_language(&mut self, ui: &mut egui::Ui, t: &Theme) -> bool {
         let mut changed = false;
-        Self::section(ui, t, crate::i18n::tr("Langue de l'interface"), crate::i18n::tr("Les notes elles-mêmes ne sont pas traduites."));
+        Self::section(
+            ui,
+            t,
+            crate::i18n::tr("Langue de l'interface"),
+            crate::i18n::tr("Les notes elles-mêmes ne sont pas traduites."),
+        );
         let current = self.lib.settings.language;
-        let auto_label = format!("{}  ·  {}", crate::i18n::tr("Automatique (langue de l'ordinateur)"), crate::i18n::system().native_name());
+        let auto_label = format!(
+            "{}  ·  {}",
+            crate::i18n::tr("Automatique (langue de l'ordinateur)"),
+            crate::i18n::system().native_name()
+        );
         let mut choices: Vec<(Option<crate::i18n::Lang>, String)> = vec![(None, auto_label)];
         for l in crate::i18n::ALL {
             choices.push((Some(l), l.native_name().to_string()));
@@ -112,7 +127,13 @@ impl GrassApp {
             if sel {
                 ui.painter().circle_filled(dot, 4.0, t.accent);
             }
-            ui.painter().text(Pos2::new(r.left() + 36.0, r.center().y), Align2::LEFT_CENTER, label, FontId::proportional(14.5), t.text);
+            ui.painter().text(
+                Pos2::new(r.left() + 36.0, r.center().y),
+                Align2::LEFT_CENTER,
+                label,
+                FontId::proportional(14.5),
+                t.text,
+            );
             if resp.clicked() && !sel {
                 self.lib.settings.language = value;
                 crate::i18n::set(value.unwrap_or_else(crate::i18n::system));
@@ -140,14 +161,28 @@ impl GrassApp {
                     p.rect_filled(list, 0.0, th.list_bg);
                     for k in 0..3 {
                         let y = r.top() + 14.0 + k as f32 * 10.0;
-                        p.hline((r.left() + 84.0)..=(r.right() - 12.0 - k as f32 * 12.0), y, Stroke::new(3.0, th.faint));
+                        p.hline(
+                            (r.left() + 84.0)..=(r.right() - 12.0 - k as f32 * 12.0),
+                            y,
+                            Stroke::new(3.0, th.faint),
+                        );
                     }
                     p.circle_filled(Pos2::new(r.left() + 17.0, r.top() + 16.0), 5.5, th.accent);
-                    p.rect_filled(Rect::from_min_size(Pos2::new(r.left() + 84.0, r.top() + 42.0), Vec2::new(26.0, 7.0)), 3.0, th.tag_bg);
+                    p.rect_filled(
+                        Rect::from_min_size(Pos2::new(r.left() + 84.0, r.top() + 42.0), Vec2::new(26.0, 7.0)),
+                        3.0,
+                        th.tag_bg,
+                    );
                     // name band across the bottom so long names fit
                     let band = Rect::from_min_max(Pos2::new(r.left() + 34.0, r.bottom() - 24.0), r.max);
                     p.rect_filled(band, CornerRadius { nw: 0, sw: 0, ne: 0, se: 8 }, th.editor_bg);
-                    p.text(Pos2::new(r.left() + 42.0, r.bottom() - 12.0), Align2::LEFT_CENTER, th.name, FontId::proportional(12.0), th.text);
+                    p.text(
+                        Pos2::new(r.left() + 42.0, r.bottom() - 12.0),
+                        Align2::LEFT_CENTER,
+                        th.name,
+                        FontId::proportional(12.0),
+                        th.text,
+                    );
                     let stroke = if sel {
                         Stroke::new(2.5, t.accent)
                     } else if resp.hovered() {
@@ -164,14 +199,31 @@ impl GrassApp {
             });
         }
         Self::section(ui, t, crate::i18n::tr("Liste des notes"), "");
-        changed |= ui.checkbox(&mut self.lib.settings.show_previews, crate::i18n::tr("Afficher un aperçu du texte sous chaque titre")).changed();
-        ui.label(egui::RichText::new(crate::i18n::trf("{0} thèmes disponibles.", &[("0", &theme::all().len() as &dyn std::fmt::Display)])).size(12.0).color(t.muted));
+        changed |= ui
+            .checkbox(
+                &mut self.lib.settings.show_previews,
+                crate::i18n::tr("Afficher un aperçu du texte sous chaque titre"),
+            )
+            .changed();
+        ui.label(
+            egui::RichText::new(crate::i18n::trf(
+                "{0} thèmes disponibles.",
+                &[("0", &theme::all().len() as &dyn std::fmt::Display)],
+            ))
+            .size(12.0)
+            .color(t.muted),
+        );
         changed
     }
 
     fn page_icon(&mut self, ui: &mut egui::Ui, t: &Theme) -> bool {
         let mut changed = false;
-        Self::section(ui, t, crate::i18n::tr("Choisissez l'icône de Grassfield Notes"), crate::i18n::tr("Elle s'affiche dans la barre des tâches et en haut de la barre latérale."));
+        Self::section(
+            ui,
+            t,
+            crate::i18n::tr("Choisissez l'icône de Grassfield Notes"),
+            crate::i18n::tr("Elle s'affiche dans la barre des tâches et en haut de la barre latérale."),
+        );
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = Vec2::new(12.0, 12.0);
             for (i, style) in icons::ICONS.iter().enumerate() {
@@ -185,9 +237,20 @@ impl GrassApp {
                 }
                 if let Some(tex) = self.icon_textures.get(i) {
                     let ir = Rect::from_center_size(Pos2::new(r.center().x, r.top() + 46.0), Vec2::splat(68.0));
-                    ui.painter().image(tex.id(), ir, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+                    ui.painter().image(
+                        tex.id(),
+                        ir,
+                        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                        Color32::WHITE,
+                    );
                 }
-                ui.painter().text(Pos2::new(r.center().x, r.bottom() - 14.0), Align2::CENTER_CENTER, style.name, FontId::proportional(12.5), t.text);
+                ui.painter().text(
+                    Pos2::new(r.center().x, r.bottom() - 14.0),
+                    Align2::CENTER_CENTER,
+                    style.name,
+                    FontId::proportional(12.5),
+                    t.text,
+                );
                 if resp.clicked() {
                     self.lib.settings.icon = i;
                     changed = true;
@@ -210,13 +273,17 @@ impl GrassApp {
             });
             ui.end_row();
             ui.label(crate::i18n::tr("Taille du texte"));
-            changed |= ui.add(egui::Slider::new(&mut s.font_size, 12.0..=26.0).step_by(1.0).fixed_decimals(0).suffix(" pt")).changed();
+            changed |= ui
+                .add(egui::Slider::new(&mut s.font_size, 12.0..=26.0).step_by(1.0).fixed_decimals(0).suffix(" pt"))
+                .changed();
             ui.end_row();
             ui.label(crate::i18n::tr("Interligne"));
             changed |= ui.add(egui::Slider::new(&mut s.line_spacing, 0.85..=1.6).fixed_decimals(2)).changed();
             ui.end_row();
             ui.label(crate::i18n::tr("Largeur de ligne"));
-            changed |= ui.add(egui::Slider::new(&mut s.line_width, 420.0..=1400.0).step_by(10.0).fixed_decimals(0).suffix(" px")).changed();
+            changed |= ui
+                .add(egui::Slider::new(&mut s.line_width, 420.0..=1400.0).step_by(10.0).fixed_decimals(0).suffix(" px"))
+                .changed();
             ui.end_row();
             ui.label(crate::i18n::tr("Symboles Markdown"));
             changed |= ui.checkbox(&mut s.dim_markup, crate::i18n::tr("Atténuer les symboles (**, #, ~~…)")).changed();
@@ -239,34 +306,58 @@ impl GrassApp {
             .size(13.0)
             .color(t.muted),
         );
-        Self::section(ui, t, crate::i18n::tr("Dépôt"), crate::i18n::tr("Créez d'abord un dépôt vide et privé sur github.com."));
+        Self::section(
+            ui,
+            t,
+            crate::i18n::tr("Dépôt"),
+            crate::i18n::tr("Créez d'abord un dépôt vide et privé sur github.com."),
+        );
         let s = &mut self.lib.settings.sync;
         egui::Grid::new("prefs-sync").num_columns(2).spacing([24.0, 12.0]).show(ui, |ui| {
             ui.label(crate::i18n::tr("Adresse du dépôt"));
             changed |= ui
-                .add(egui::TextEdit::singleline(&mut s.repo_url).hint_text(crate::i18n::tr("https://github.com/nom/mes-notes.git")).desired_width(420.0))
+                .add(
+                    egui::TextEdit::singleline(&mut s.repo_url)
+                        .hint_text(crate::i18n::tr("https://github.com/nom/mes-notes.git"))
+                        .desired_width(420.0),
+                )
                 .changed();
             ui.end_row();
             ui.label(crate::i18n::tr("Branche"));
-            changed |= ui.add(egui::TextEdit::singleline(&mut s.branch).hint_text("main").desired_width(160.0)).changed();
+            changed |=
+                ui.add(egui::TextEdit::singleline(&mut s.branch).hint_text("main").desired_width(160.0)).changed();
             ui.end_row();
             ui.label(crate::i18n::tr("Jeton d'accès"));
             ui.horizontal(|ui| {
                 // the token goes to the system keyring when the field is left, never to the notes folder
-                let hint = if s.token_in_keyring { crate::i18n::tr("•••••• enregistré dans le trousseau du système") } else { crate::i18n::tr("ghp_… (facultatif avec SSH)") };
-                let r = ui.add(egui::TextEdit::singleline(&mut self.token_input).password(true).hint_text(hint).desired_width(420.0));
+                let hint = if s.token_in_keyring {
+                    crate::i18n::tr("•••••• enregistré dans le trousseau du système")
+                } else {
+                    crate::i18n::tr("ghp_… (facultatif avec SSH)")
+                };
+                let r = ui.add(
+                    egui::TextEdit::singleline(&mut self.token_input)
+                        .password(true)
+                        .hint_text(hint)
+                        .desired_width(420.0),
+                );
                 if r.lost_focus() && !self.token_input.trim().is_empty() {
                     store_token = Some(std::mem::take(&mut self.token_input).trim().to_string());
                 }
                 if (s.token_in_keyring || !s.token.is_empty())
-                    && ui.add_enabled(self.secret_job.is_none(), egui::Button::new(crate::i18n::tr("Oublier"))).on_hover_text(crate::i18n::tr("Retirer le jeton du trousseau du système")).clicked()
+                    && ui
+                        .add_enabled(self.secret_job.is_none(), egui::Button::new(crate::i18n::tr("Oublier")))
+                        .on_hover_text(crate::i18n::tr("Retirer le jeton du trousseau du système"))
+                        .clicked()
                 {
                     forget_token = true;
                 }
             });
             ui.end_row();
             ui.label(crate::i18n::tr("Automatique"));
-            changed |= ui.checkbox(&mut s.auto, crate::i18n::tr("Synchroniser au démarrage puis toutes les 10 minutes")).changed();
+            changed |= ui
+                .checkbox(&mut s.auto, crate::i18n::tr("Synchroniser au démarrage puis toutes les 10 minutes"))
+                .changed();
             ui.end_row();
         });
         if let Some(token) = store_token {
@@ -289,8 +380,14 @@ impl GrassApp {
         ui.add_space(12.0);
         ui.horizontal(|ui| {
             let busy = self.sync_job.is_some();
-            let label = if busy { crate::i18n::tr("Synchronisation…") } else { crate::i18n::tr("🔄  Synchroniser maintenant") };
-            let b = egui::Button::new(egui::RichText::new(label).color(Color32::WHITE).size(14.0)).fill(t.accent).stroke(Stroke::NONE);
+            let label = if busy {
+                crate::i18n::tr("Synchronisation…")
+            } else {
+                crate::i18n::tr("🔄  Synchroniser maintenant")
+            };
+            let b = egui::Button::new(egui::RichText::new(label).color(Color32::WHITE).size(14.0))
+                .fill(t.accent)
+                .stroke(Stroke::NONE);
             if ui.add_enabled(!busy && self.persist, b).clicked() {
                 self.actions.push(Action::SyncNow);
             }
@@ -310,15 +407,27 @@ impl GrassApp {
         }
         let last = self.lib.settings.sync.last_sync;
         ui.label(
-            egui::RichText::new(if last > 0 { crate::i18n::trf("Dernière synchronisation : {0}", &[("0", &format_full_date(last) as &dyn std::fmt::Display)]) } else { crate::i18n::tr("Jamais synchronisé").into() })
-                .size(12.0)
-                .color(t.muted),
+            egui::RichText::new(if last > 0 {
+                crate::i18n::trf(
+                    "Dernière synchronisation : {0}",
+                    &[("0", &format_full_date(last) as &dyn std::fmt::Display)],
+                )
+            } else {
+                crate::i18n::tr("Jamais synchronisé").into()
+            })
+            .size(12.0)
+            .color(t.muted),
         );
         changed
     }
 
     fn page_export(&mut self, ui: &mut egui::Ui, t: &Theme) {
-        Self::section(ui, t, crate::i18n::tr("Exporter toutes les notes"), crate::i18n::tr("Une note s'exporte aussi depuis son menu « ••• » ou un clic droit dans la liste."));
+        Self::section(
+            ui,
+            t,
+            crate::i18n::tr("Exporter toutes les notes"),
+            crate::i18n::tr("Une note s'exporte aussi depuis son menu « ••• » ou un clic droit dans la liste."),
+        );
         ui.horizontal_wrapped(|ui| {
             for f in export::ALL {
                 ui.selectable_value(&mut self.export_all_format, f, f.label());
@@ -326,15 +435,31 @@ impl GrassApp {
         });
         ui.add_space(10.0);
         let n = self.lib.notes.iter().filter(|n| !n.trashed).count();
-        let b = egui::Button::new(egui::RichText::new(crate::i18n::trf("📤  Exporter {n} note(s) en {0}", &[("0", &self.export_all_format.ext().to_uppercase() as &dyn std::fmt::Display), ("n", &n as &dyn std::fmt::Display)])).color(Color32::WHITE))
-            .fill(t.accent)
-            .stroke(Stroke::NONE);
+        let b = egui::Button::new(
+            egui::RichText::new(crate::i18n::trf(
+                "📤  Exporter {n} note(s) en {0}",
+                &[
+                    ("0", &self.export_all_format.ext().to_uppercase() as &dyn std::fmt::Display),
+                    ("n", &n as &dyn std::fmt::Display),
+                ],
+            ))
+            .color(Color32::WHITE),
+        )
+        .fill(t.accent)
+        .stroke(Stroke::NONE);
         if ui.add(b).clicked() {
             let ids: Vec<u64> = self.lib.notes.iter().filter(|n| !n.trashed).map(|n| n.id).collect();
             let f = self.export_all_format;
             self.export(ui.ctx(), &ids, f);
         }
-        ui.label(egui::RichText::new(crate::i18n::trf("Dossier : {0}", &[("0", &Self::export_dir().display() as &dyn std::fmt::Display)])).size(12.0).color(t.muted));
+        ui.label(
+            egui::RichText::new(crate::i18n::trf(
+                "Dossier : {0}",
+                &[("0", &Self::export_dir().display() as &dyn std::fmt::Display)],
+            ))
+            .size(12.0)
+            .color(t.muted),
+        );
         Self::section(ui, t, crate::i18n::tr("Formats"), "");
         for (f, what) in [
             (Format::Txt, crate::i18n::tr("le texte seul, sans mise en forme")),
@@ -355,7 +480,12 @@ impl GrassApp {
     }
 
     fn page_data(&mut self, ui: &mut egui::Ui, t: &Theme) {
-        Self::section(ui, t, crate::i18n::tr("Vos notes restent sur cet ordinateur"), crate::i18n::tr("Elles fonctionnent sans connexion ; la synchronisation GitHub est facultative."));
+        Self::section(
+            ui,
+            t,
+            crate::i18n::tr("Vos notes restent sur cet ordinateur"),
+            crate::i18n::tr("Elles fonctionnent sans connexion ; la synchronisation GitHub est facultative."),
+        );
         ui.label(egui::RichText::new(Library::data_path().display().to_string()).monospace().size(12.0).color(t.muted));
         ui.horizontal(|ui| {
             if ui.button(crate::i18n::tr("📂  Ouvrir le dossier des notes")).clicked() {
@@ -367,7 +497,14 @@ impl GrassApp {
                 self.actions.push(Action::PickFiles(Purpose::Import));
             }
         });
-        Self::section(ui, t, crate::i18n::tr("Fichiers Markdown"), crate::i18n::tr("Grassfield Notes peut aussi lire et modifier n'importe quel fichier .md, sans l'ajouter à vos notes."));
+        Self::section(
+            ui,
+            t,
+            crate::i18n::tr("Fichiers Markdown"),
+            crate::i18n::tr(
+                "Grassfield Notes peut aussi lire et modifier n'importe quel fichier .md, sans l'ajouter à vos notes.",
+            ),
+        );
         ui.horizontal_wrapped(|ui| {
             if ui.button(crate::i18n::tr("📄  Ouvrir un fichier .md… (Ctrl+O)")).clicked() {
                 self.actions.push(Action::PickFiles(Purpose::OpenFile));
@@ -375,20 +512,37 @@ impl GrassApp {
             // in the Grassfield desktop the session itself makes Notes the app for .md files
             let grassfield = std::env::var("GRASSFIELD_SESSION").as_deref() == Ok("1");
             if !grassfield
-                && ui.button(crate::i18n::tr("🔗  Ouvrir les fichiers .md avec Grassfield Notes")).on_hover_text(crate::i18n::tr("Double-cliquer sur un fichier .md l'ouvrira ici")).clicked()
+                && ui
+                    .button(crate::i18n::tr("🔗  Ouvrir les fichiers .md avec Grassfield Notes"))
+                    .on_hover_text(crate::i18n::tr("Double-cliquer sur un fichier .md l'ouvrira ici"))
+                    .clicked()
             {
                 let msg = desktop::associate_markdown();
                 self.notify(ui.ctx(), msg);
             }
         });
         ui.label(
-            egui::RichText::new(crate::i18n::tr("Vous pouvez aussi glisser un fichier .md dans la fenêtre, ou lancer : grassfield-notes fichier.md"))
-                .size(12.0)
-                .color(t.muted),
+            egui::RichText::new(crate::i18n::tr(
+                "Vous pouvez aussi glisser un fichier .md dans la fenêtre, ou lancer : grassfield-notes fichier.md",
+            ))
+            .size(12.0)
+            .color(t.muted),
         );
         let docs: usize = self.lib.notes.iter().map(|n| n.attachments.len()).sum();
-        ui.label(egui::RichText::new(crate::i18n::trf("{0} notes, {1} documents joints", &[("0", &self.lib.notes.len() as &dyn std::fmt::Display), ("1", &docs as &dyn std::fmt::Display)])).size(12.5).color(t.muted));
-        Self::section(ui, t, crate::i18n::tr("Documents numérisés et recherche"), crate::i18n::tr("Le texte des images et des PDF est lu pour que la recherche les trouve."));
+        ui.label(
+            egui::RichText::new(crate::i18n::trf(
+                "{0} notes, {1} documents joints",
+                &[("0", &self.lib.notes.len() as &dyn std::fmt::Display), ("1", &docs as &dyn std::fmt::Display)],
+            ))
+            .size(12.5)
+            .color(t.muted),
+        );
+        Self::section(
+            ui,
+            t,
+            crate::i18n::tr("Documents numérisés et recherche"),
+            crate::i18n::tr("Le texte des images et des PDF est lu pour que la recherche les trouve."),
+        );
         let tools = attach::tools();
         let status = |ok: bool| if ok { crate::i18n::tr("✔ installé") } else { crate::i18n::tr("✖ absent") };
         egui::Grid::new("tools").num_columns(2).spacing([24.0, 8.0]).show(ui, |ui| {
@@ -430,7 +584,9 @@ impl GrassApp {
                 ("Ctrl+,", crate::i18n::tr("Préférences")),
                 (crate::i18n::tr("Échap"), crate::i18n::tr("Fermer les préférences")),
             ] {
-                ui.label(egui::RichText::new(crate::platform::shortcut_label(k)).monospace().size(13.0).color(t.accent_text));
+                ui.label(
+                    egui::RichText::new(crate::platform::shortcut_label(k)).monospace().size(13.0).color(t.accent_text),
+                );
                 ui.label(egui::RichText::new(v).size(13.0).color(t.text));
                 ui.end_row();
             }
@@ -462,7 +618,9 @@ mod desktop {
             exe.display(),
             icon.display()
         );
-        if let Err(e) = std::fs::create_dir_all(&apps).and_then(|_| std::fs::write(apps.join("grassfield-notes.desktop"), desktop)) {
+        if let Err(e) =
+            std::fs::create_dir_all(&apps).and_then(|_| std::fs::write(apps.join("grassfield-notes.desktop"), desktop))
+        {
             return trf("Association impossible : {e}", &[("e", &e)]);
         }
         let mut ok = true;
@@ -496,9 +654,26 @@ mod desktop {
             vec![prog.into(), "/ve".into(), "/d".into(), "Markdown".into()],
             vec![format!(r"{prog}\DefaultIcon"), "/ve".into(), "/d".into(), icon],
             vec![format!(r"{prog}\shell\open\command"), "/ve".into(), "/d".into(), open_cmd.clone()],
-            vec![r"HKCU\Software\Classes\Applications\grassfield-notes.exe\shell\open\command".into(), "/ve".into(), "/d".into(), open_cmd],
-            vec![r"HKCU\Software\Classes\.md\OpenWithProgids".into(), "/v".into(), "GrassfieldNotes.Markdown".into(), "/t".into(), "REG_NONE".into()],
-            vec![r"HKCU\Software\Classes\.markdown\OpenWithProgids".into(), "/v".into(), "GrassfieldNotes.Markdown".into(), "/t".into(), "REG_NONE".into()],
+            vec![
+                r"HKCU\Software\Classes\Applications\grassfield-notes.exe\shell\open\command".into(),
+                "/ve".into(),
+                "/d".into(),
+                open_cmd,
+            ],
+            vec![
+                r"HKCU\Software\Classes\.md\OpenWithProgids".into(),
+                "/v".into(),
+                "GrassfieldNotes.Markdown".into(),
+                "/t".into(),
+                "REG_NONE".into(),
+            ],
+            vec![
+                r"HKCU\Software\Classes\.markdown\OpenWithProgids".into(),
+                "/v".into(),
+                "GrassfieldNotes.Markdown".into(),
+                "/t".into(),
+                "REG_NONE".into(),
+            ],
         ];
         for k in keys {
             let ok = crate::platform::command("reg")

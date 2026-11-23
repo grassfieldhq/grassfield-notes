@@ -1,8 +1,8 @@
 //! Sketch window: draw with a pen, pencil, highlighter, eraser or ruler, then keep it in the note.
 
 use super::*;
-use crate::sketch::{self, Sketch, Tool};
 use crate::i18n::tr;
+use crate::sketch::{self, Sketch, Tool};
 
 pub(super) struct SketchEditor {
     note_id: u64,
@@ -32,10 +32,8 @@ const PALETTE: [[u8; 3]; 9] = [
 impl GrassApp {
     /// Open the sketch window for a new sketch, or to edit an existing one.
     pub(super) fn open_sketch(&mut self, note_id: u64, name: Option<String>) {
-        let sk = name
-            .as_ref()
-            .and_then(|n| sketch::load(&Library::attachment_dir(note_id).join(n)))
-            .unwrap_or_default();
+        let sk =
+            name.as_ref().and_then(|n| sketch::load(&Library::attachment_dir(note_id).join(n))).unwrap_or_default();
         self.sketcher = Some(SketchEditor {
             note_id,
             name,
@@ -63,7 +61,11 @@ impl GrassApp {
                 ui.set_width(size.x - 28.0);
                 ui.set_height(size.y - 28.0);
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(tr("Croquis")).font(FontId::new(18.0, FontFamily::Name("bold".into()))).color(t.text));
+                    ui.label(
+                        egui::RichText::new(tr("Croquis"))
+                            .font(FontId::new(18.0, FontFamily::Name("bold".into())))
+                            .color(t.text),
+                    );
                     ui.add_space(16.0);
                     for (tool, label) in [
                         (Tool::Pen, tr("Stylo")),
@@ -108,7 +110,12 @@ impl GrassApp {
                 p.rect_filled(canvas, 4.0, Color32::WHITE);
                 ui.painter().rect_stroke(canvas, 4.0, Stroke::new(1.0, t.border), egui::StrokeKind::Outside);
                 let to_screen = |q: [f32; 2]| Pos2::new(canvas.left() + q[0] * k, canvas.top() + q[1] * k);
-                let to_canvas = |s: Pos2| [((s.x - canvas.left()) / k).clamp(0.0, ed.sketch.width), ((s.y - canvas.top()) / k).clamp(0.0, ed.sketch.height)];
+                let to_canvas = |s: Pos2| {
+                    [
+                        ((s.x - canvas.left()) / k).clamp(0.0, ed.sketch.width),
+                        ((s.y - canvas.top()) / k).clamp(0.0, ed.sketch.height),
+                    ]
+                };
                 // input
                 if let Some(pos) = resp.interact_pointer_pos() {
                     let q = to_canvas(pos);
@@ -173,7 +180,13 @@ impl GrassApp {
                     p.circle_stroke(h, r, Stroke::new(1.0, Color32::from_black_alpha(90)));
                 }
                 if ed.sketch.strokes.is_empty() && ed.current.is_none() {
-                    p.text(canvas.center(), Align2::CENTER_CENTER, tr("Dessinez ici avec la souris, un stylet ou le pavé tactile"), FontId::proportional(15.0), Color32::from_gray(170));
+                    p.text(
+                        canvas.center(),
+                        Align2::CENTER_CENTER,
+                        tr("Dessinez ici avec la souris, un stylet ou le pavé tactile"),
+                        FontId::proportional(15.0),
+                        Color32::from_gray(170),
+                    );
                 }
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
@@ -189,7 +202,11 @@ impl GrassApp {
                         ed.undo.push(std::mem::take(&mut ed.sketch.strokes));
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let b = egui::Button::new(egui::RichText::new(tr("Enregistrer dans la note")).color(Color32::WHITE)).fill(t.accent).stroke(Stroke::NONE);
+                        let b = egui::Button::new(
+                            egui::RichText::new(tr("Enregistrer dans la note")).color(Color32::WHITE),
+                        )
+                        .fill(t.accent)
+                        .stroke(Stroke::NONE);
                         if ui.add(b).clicked() {
                             save = true;
                         }
@@ -270,14 +287,34 @@ impl SketchEditor {
             let x = 150.0 + i as f32 * 15.0;
             wave.push([x, 420.0 + (i as f32 / 6.0).sin() * 80.0]);
         }
-        self.sketch.strokes.push(sketch::Stroke { tool: Tool::Pen, color: [0x1F, 0x22, 0x1F], width: 5.0, points: wave });
-        self.sketch.strokes.push(sketch::Stroke { tool: Tool::Marker, color: [0xF2, 0xC6, 0x2F], width: 30.0, points: vec![[200.0, 250.0], [700.0, 250.0]] });
-        self.sketch.strokes.push(sketch::Stroke { tool: Tool::Ruler, color: [0x2F, 0x7B, 0xC8], width: 4.0, points: vec![[150.0, 650.0], [1050.0, 650.0]] });
+        self.sketch.strokes.push(sketch::Stroke {
+            tool: Tool::Pen,
+            color: [0x1F, 0x22, 0x1F],
+            width: 5.0,
+            points: wave,
+        });
+        self.sketch.strokes.push(sketch::Stroke {
+            tool: Tool::Marker,
+            color: [0xF2, 0xC6, 0x2F],
+            width: 30.0,
+            points: vec![[200.0, 250.0], [700.0, 250.0]],
+        });
+        self.sketch.strokes.push(sketch::Stroke {
+            tool: Tool::Ruler,
+            color: [0x2F, 0x7B, 0xC8],
+            width: 4.0,
+            points: vec![[150.0, 650.0], [1050.0, 650.0]],
+        });
         let mut circle = Vec::new();
         for i in 0..=48 {
             let a = i as f32 / 48.0 * std::f32::consts::TAU;
             circle.push([950.0 + a.cos() * 90.0, 230.0 + a.sin() * 90.0]);
         }
-        self.sketch.strokes.push(sketch::Stroke { tool: Tool::Pencil, color: [0xD8, 0x3B, 0x30], width: 3.0, points: circle });
+        self.sketch.strokes.push(sketch::Stroke {
+            tool: Tool::Pencil,
+            color: [0xD8, 0x3B, 0x30],
+            width: 3.0,
+            points: circle,
+        });
     }
 }

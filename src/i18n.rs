@@ -103,7 +103,9 @@ fn table() -> &'static HashMap<&'static str, Row> {
     static T: OnceLock<HashMap<&'static str, Row>> = OnceLock::new();
     T.get_or_init(|| {
         let mut m = HashMap::new();
-        for row in table_a::ROWS.iter().chain(table_b::ROWS.iter()).chain(table_c::ROWS.iter()).chain(table_d::ROWS.iter()) {
+        for row in
+            table_a::ROWS.iter().chain(table_b::ROWS.iter()).chain(table_c::ROWS.iter()).chain(table_d::ROWS.iter())
+        {
             m.insert(row[0], *row);
         }
         m

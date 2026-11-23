@@ -39,8 +39,6 @@ jobs:
   format:
     name: Formatting
     runs-on: ubuntu-latest
-    # Not blocking until the whole code base has been run through `cargo fmt` once.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

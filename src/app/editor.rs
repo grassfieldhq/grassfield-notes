@@ -35,9 +35,8 @@ impl GrassApp {
             let sl = suffix.chars().count();
             let selected = &note.text[ba..bb];
             // "*" must not match one star of a "**" bold marker
-            let lone_star_ok = |before: &str, after: &str| {
-                prefix != "*" || (!before.ends_with("**") && !after.starts_with("**"))
-            };
+            let lone_star_ok =
+                |before: &str, after: &str| prefix != "*" || (!before.ends_with("**") && !after.starts_with("**"));
             let around = note.text[..ba].ends_with(prefix)
                 && note.text[bb..].starts_with(suffix)
                 && lone_star_ok(&note.text[..ba], &note.text[bb..]);
@@ -77,9 +76,7 @@ impl GrassApp {
         let start = note.text[..ba].rfind('\n').map(|x| x + 1).unwrap_or(0);
         let end = note.text[bb..].find('\n').map(|x| bb + x).unwrap_or(note.text.len());
         let block = note.text[start..end].to_string();
-        let known = [
-            "- [ ] ", "- [x] ", "- [X] ", "> ", "- ", "* ", "###### ", "##### ", "#### ", "### ", "## ", "# ",
-        ];
+        let known = ["- [ ] ", "- [x] ", "- [X] ", "> ", "- ", "* ", "###### ", "##### ", "#### ", "### ", "## ", "# "];
         let lines: Vec<&str> = block.split('\n').collect();
         let all_have = lines.iter().all(|l| l.starts_with(prefix));
         let mut out = Vec::new();
@@ -174,15 +171,30 @@ impl GrassApp {
                 crate::i18n::tr("Italique"),
                 false,
             ),
-            (egui::RichText::new("S").strikethrough().size(14.0), crate::i18n::tr("Barré (Ctrl+Maj+X)"), crate::i18n::tr("Barré"), false),
+            (
+                egui::RichText::new("S").strikethrough().size(14.0),
+                crate::i18n::tr("Barré (Ctrl+Maj+X)"),
+                crate::i18n::tr("Barré"),
+                false,
+            ),
             (
                 egui::RichText::new("ab").size(13.0).background_color(t.highlight_bg),
                 crate::i18n::tr("Surligner (Ctrl+Maj+H)"),
                 crate::i18n::tr("Surligner"),
                 false,
             ),
-            (egui::RichText::new("</>").monospace().size(12.0), crate::i18n::tr("Code en ligne"), crate::i18n::tr("Code en ligne"), true),
-            (egui::RichText::new("☰").size(14.0), crate::i18n::tr("Liste à puces"), crate::i18n::tr("Liste à puces"), false),
+            (
+                egui::RichText::new("</>").monospace().size(12.0),
+                crate::i18n::tr("Code en ligne"),
+                crate::i18n::tr("Code en ligne"),
+                true,
+            ),
+            (
+                egui::RichText::new("☰").size(14.0),
+                crate::i18n::tr("Liste à puces"),
+                crate::i18n::tr("Liste à puces"),
+                false,
+            ),
             (
                 egui::RichText::new("☑").size(14.0),
                 crate::i18n::tr("Liste de tâches (Ctrl+Entrée pour cocher)"),
@@ -190,9 +202,19 @@ impl GrassApp {
                 false,
             ),
             (egui::RichText::new("“").size(18.0), crate::i18n::tr("Citation"), crate::i18n::tr("Citation"), false),
-            (egui::RichText::new("🔗").size(13.0), crate::i18n::tr("Lien vers une note [[…]] (Ctrl+K)"), crate::i18n::tr("Lien vers une note"), false),
+            (
+                egui::RichText::new("🔗").size(13.0),
+                crate::i18n::tr("Lien vers une note [[…]] (Ctrl+K)"),
+                crate::i18n::tr("Lien vers une note"),
+                false,
+            ),
             (egui::RichText::new("—").size(14.0), crate::i18n::tr("Séparateur"), crate::i18n::tr("Séparateur"), false),
-            (egui::RichText::new("#").size(14.0), crate::i18n::tr("Ajouter un tag"), crate::i18n::tr("Ajouter un tag"), false),
+            (
+                egui::RichText::new("#").size(14.0),
+                crate::i18n::tr("Ajouter un tag"),
+                crate::i18n::tr("Ajouter un tag"),
+                false,
+            ),
         ]
     }
 
@@ -236,7 +258,11 @@ impl GrassApp {
             }
             ui.painter().rect_stroke(ib, 3.0, Stroke::new(1.3, col), egui::StrokeKind::Inside);
             ui.painter().vline(ib.left() + 6.0, ib.y_range(), Stroke::new(1.3, col));
-            let tip = if self.focus_mode { crate::i18n::tr("Afficher les colonnes (Ctrl+Maj+F)") } else { crate::i18n::tr("Mode concentration (Ctrl+Maj+F)") };
+            let tip = if self.focus_mode {
+                crate::i18n::tr("Afficher les colonnes (Ctrl+Maj+F)")
+            } else {
+                crate::i18n::tr("Mode concentration (Ctrl+Maj+F)")
+            };
             if resp.on_hover_text(tip).clicked() {
                 self.focus_mode = !self.focus_mode;
             }
@@ -281,7 +307,12 @@ impl GrassApp {
                 ui.add_space(10.0);
                 let info_col = if self.show_info { t.accent_text } else { t.muted };
                 if ui
-                    .add(egui::Button::new(egui::RichText::new("ℹ").size(16.0).color(info_col)).frame(true).frame_when_inactive(false).min_size(Vec2::new(26.0, 26.0)))
+                    .add(
+                        egui::Button::new(egui::RichText::new("ℹ").size(16.0).color(info_col))
+                            .frame(true)
+                            .frame_when_inactive(false)
+                            .min_size(Vec2::new(26.0, 26.0)),
+                    )
                     .on_hover_text(crate::i18n::tr("Infos sur la note (Ctrl+Maj+I)"))
                     .clicked()
                 {
@@ -320,8 +351,17 @@ impl GrassApp {
                             }
                             let pin_col = if pinned { t.accent } else { t.muted };
                             if ui
-                                .add(egui::Button::new(egui::RichText::new("📌").size(14.0).color(pin_col)).frame(true).frame_when_inactive(false).min_size(Vec2::new(26.0, 26.0)))
-                                .on_hover_text(if pinned { crate::i18n::tr("Désépingler") } else { crate::i18n::tr("Épingler en haut de la liste") })
+                                .add(
+                                    egui::Button::new(egui::RichText::new("📌").size(14.0).color(pin_col))
+                                        .frame(true)
+                                        .frame_when_inactive(false)
+                                        .min_size(Vec2::new(26.0, 26.0)),
+                                )
+                                .on_hover_text(if pinned {
+                                    crate::i18n::tr("Désépingler")
+                                } else {
+                                    crate::i18n::tr("Épingler en haut de la liste")
+                                })
                                 .clicked()
                             {
                                 self.actions.push(Action::TogglePin(id));
@@ -365,13 +405,14 @@ impl GrassApp {
 
         let trashed = self.lib.get(id).map(|n| n.trashed).unwrap_or(false);
         if trashed {
-            egui::Frame::new()
-                .fill(t.highlight_bg.gamma_multiply(0.5))
-                .inner_margin(Margin::symmetric(16, 8))
-                .show(ui, |ui| {
+            egui::Frame::new().fill(t.highlight_bg.gamma_multiply(0.5)).inner_margin(Margin::symmetric(16, 8)).show(
+                ui,
+                |ui| {
                     ui.set_width(ui.available_width());
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(crate::i18n::tr("Cette note est dans la corbeille.")).color(t.text));
+                        ui.label(
+                            egui::RichText::new(crate::i18n::tr("Cette note est dans la corbeille.")).color(t.text),
+                        );
                         if ui.button(crate::i18n::tr("Restaurer")).clicked() {
                             self.actions.push(Action::Restore(id));
                         }
@@ -379,15 +420,13 @@ impl GrassApp {
                             self.actions.push(Action::DeleteForever(id));
                         }
                     });
-                });
+                },
+            );
         }
 
         // status bar at the bottom
-        let (words, chars, modified) = self
-            .lib
-            .get(id)
-            .map(|n| (word_count(&n.text), n.text.chars().count(), n.modified))
-            .unwrap_or((0, 0, 0));
+        let (words, chars, modified) =
+            self.lib.get(id).map(|n| (word_count(&n.text), n.text.chars().count(), n.modified)).unwrap_or((0, 0, 0));
         egui::Panel::bottom("status")
             .frame(egui::Frame::new().fill(t.editor_bg).inner_margin(Margin::symmetric(16, 6)))
             .show_separator_line(false)
@@ -395,15 +434,25 @@ impl GrassApp {
                 ui.horizontal(|ui| {
                     let mins = ((words as f32) / 200.0).ceil().max(1.0) as usize;
                     ui.label(
-                        egui::RichText::new(crate::i18n::trf("{words} mots · {chars} caractères · {mins} min de lecture", &[("words", &words as &dyn std::fmt::Display), ("chars", &chars as &dyn std::fmt::Display), ("mins", &mins as &dyn std::fmt::Display)]))
-                            .size(11.5)
-                            .color(t.muted),
+                        egui::RichText::new(crate::i18n::trf(
+                            "{words} mots · {chars} caractères · {mins} min de lecture",
+                            &[
+                                ("words", &words as &dyn std::fmt::Display),
+                                ("chars", &chars as &dyn std::fmt::Display),
+                                ("mins", &mins as &dyn std::fmt::Display),
+                            ],
+                        ))
+                        .size(11.5)
+                        .color(t.muted),
                     );
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.label(
-                            egui::RichText::new(crate::i18n::trf("Modifiée le {0}", &[("0", &format_full_date(modified) as &dyn std::fmt::Display)]))
-                                .size(11.5)
-                                .color(t.muted),
+                            egui::RichText::new(crate::i18n::trf(
+                                "Modifiée le {0}",
+                                &[("0", &format_full_date(modified) as &dyn std::fmt::Display)],
+                            ))
+                            .size(11.5)
+                            .color(t.muted),
                         );
                     });
                 });
@@ -458,7 +507,40 @@ impl GrassApp {
                     toggle_line_at = Some(Self::char_to_byte(&text, a));
                 }
             }
+            // Return on a list line continues the list (or ends it on an empty item); Shift+Return stays a plain new line.
+            // Only when Return is the frame's one edit: the caret is last frame's, so text typed in the same frame
+            // (fast typing) would land after the new marker; then Return stays plain for that frame.
+            let plain_return = ctx.input(|i| {
+                i.modifiers.is_none()
+                    && i.num_presses(Key::Enter) == 1
+                    && !i
+                        .events
+                        .iter()
+                        .any(|e| matches!(e, egui::Event::Text(_) | egui::Event::Paste(_) | egui::Event::Ime(_)))
+            });
+            let caret = self.cursor.filter(|(a, b)| a == b).map(|(a, _)| a);
+            if let (true, Some(caret)) = (plain_return, caret) {
+                let edit = self.lib.get(id).and_then(|n| textedit::list_return(&n.text, caret));
+                if let Some(edit) = edit {
+                    ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
+                    if let Some(note) = self.lib.get_mut(id) {
+                        note.text.replace_range(edit.range, &edit.insert);
+                        note.modified = now();
+                    }
+                    let mut state = egui::text_edit::TextEditState::load(&ctx, editor_id).unwrap_or_default();
+                    let c = egui::text::CCursor::new(edit.caret);
+                    state.cursor.set_char_range(Some(egui::text::CCursorRange::one(c)));
+                    state.store(&ctx, editor_id);
+                    self.cursor = Some((edit.caret, edit.caret));
+                    self.mark_dirty(&ctx);
+                }
+            }
         }
+        // A picture pasted with Ctrl+V (an image and no text on the clipboard) goes into the note, as a dropped one.
+        let pasted_image =
+            if ctx.memory(|m| m.has_focus(editor_id)) && !trashed { textedit::take_pasted_image(&ctx) } else { None };
+        // the selection before this frame, for a right-click that lands on it
+        let selection_before = textedit::saved_selection(&ctx, editor_id);
         let focus_editor = std::mem::take(&mut self.focus_editor);
         let mut new_cursor = None;
         let style_key = (
@@ -470,74 +552,88 @@ impl GrassApp {
         );
         let cache = &mut self.layout_cache;
         let lines = &mut self.line_cache;
-        egui::ScrollArea::vertical()
-            .id_salt(("editor-scroll", id))
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                // keep comfortable margins, and shrink them on narrow windows
-                let avail = ui.available_width();
-                let pad = if avail < 520.0 { 16.0 } else { 40.0 };
-                let w = settings.line_width.min(avail - 2.0 * pad).max(120.0);
-                let side = ((avail - w) / 2.0).max(pad.min(avail / 2.0));
-                ui.add_space(28.0);
-                // room for each inline picture: as wide as the text at most, never taller than 420
-                let pic_size = |tex: &egui::TextureHandle| overlay::pic_size(tex, w);
-                let mut img_key = 0u64;
-                for (name, tex, _) in &pics {
-                    let h = pic_size(tex).y + 16.0;
-                    style.images.insert(name.clone(), h);
-                    img_key = img_key.wrapping_mul(31).wrapping_add(h.to_bits() as u64 ^ name.len() as u64);
-                }
-                ui.horizontal(|ui| {
-                    ui.add_space(side);
-                    let Some(note) = self.lib.notes.iter_mut().find(|n| n.id == id) else { return };
-                    // Styling the whole note is the costly part, so reuse it while nothing changed.
-                    let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap: f32| {
-                        use std::hash::{Hash, Hasher};
-                        let mut h = std::collections::hash_map::DefaultHasher::new();
-                        buf.as_str().hash(&mut h);
-                        wrap.to_bits().hash(&mut h);
-                        style_key.hash(&mut h);
-                        img_key.hash(&mut h);
-                        let key = h.finish();
-                        let job = match cache {
-                            Some((k, job)) if *k == key => job.clone(),
-                            _ => {
-                                let job = markdown::layout_job_cached(buf.as_str(), &style, wrap, lines);
-                                *cache = Some((key, job.clone()));
-                                job
-                            }
-                        };
-                        ui.fonts_mut(|f| f.layout_job(job))
+        egui::ScrollArea::vertical().id_salt(("editor-scroll", id)).auto_shrink([false, false]).show(ui, |ui| {
+            // keep comfortable margins, and shrink them on narrow windows
+            let avail = ui.available_width();
+            let pad = if avail < 520.0 { 16.0 } else { 40.0 };
+            let w = settings.line_width.min(avail - 2.0 * pad).max(120.0);
+            let side = ((avail - w) / 2.0).max(pad.min(avail / 2.0));
+            ui.add_space(28.0);
+            // room for each inline picture: as wide as the text at most, never taller than 420
+            let pic_size = |tex: &egui::TextureHandle| overlay::pic_size(tex, w);
+            let mut img_key = 0u64;
+            for (name, tex, _) in &pics {
+                let h = pic_size(tex).y + 16.0;
+                style.images.insert(name.clone(), h);
+                img_key = img_key.wrapping_mul(31).wrapping_add(h.to_bits() as u64 ^ name.len() as u64);
+            }
+            ui.horizontal(|ui| {
+                ui.add_space(side);
+                let Some(note) = self.lib.notes.iter_mut().find(|n| n.id == id) else { return };
+                // Styling the whole note is the costly part, so reuse it while nothing changed.
+                let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap: f32| {
+                    use std::hash::{Hash, Hasher};
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    buf.as_str().hash(&mut h);
+                    wrap.to_bits().hash(&mut h);
+                    style_key.hash(&mut h);
+                    img_key.hash(&mut h);
+                    let key = h.finish();
+                    let job = match cache {
+                        Some((k, job)) if *k == key => job.clone(),
+                        _ => {
+                            let job = markdown::layout_job_cached(buf.as_str(), &style, wrap, lines);
+                            *cache = Some((key, job.clone()));
+                            job
+                        }
                     };
-                    let min_h = (ui.available_height() - 40.0).max(200.0);
-                    let out = egui::TextEdit::multiline(&mut note.text)
+                    ui.fonts_mut(|f| f.layout_job(job))
+                };
+                let min_h = (ui.available_height() - 40.0).max(200.0);
+                let out = if trashed {
+                    // a note in the trash is read-only, but its text can still be selected and copied
+                    let mut ro: &str = note.text.as_str();
+                    egui::TextEdit::multiline(&mut ro)
+                        .id(editor_id)
+                        .frame(egui::Frame::NONE)
+                        .desired_width(w)
+                        .min_size(Vec2::new(w, min_h))
+                        .layouter(&mut layouter)
+                        .show(ui)
+                } else {
+                    egui::TextEdit::multiline(&mut note.text)
                         .id(editor_id)
                         .frame(egui::Frame::NONE)
                         .desired_width(w)
                         .min_size(Vec2::new(w, min_h))
                         .lock_focus(true)
-                        .interactive(!trashed)
                         .hint_text(crate::i18n::tr("Commencez à écrire…"))
                         .layouter(&mut layouter)
-                        .show(ui);
-                    let resp = out.response.response.clone();
-                    if focus_editor {
-                        resp.request_focus();
-                    }
-                    if resp.changed() {
-                        changed = true;
-                    }
-                    if let Some(r) = out.cursor_range {
-                        let rr = r.as_sorted_char_range();
-                        new_cursor = Some((rr.start.0, rr.end.0));
-                    }
+                        .show(ui)
+                };
+                let resp = out.response.response.clone();
+                if focus_editor {
+                    resp.request_focus();
+                }
+                if resp.changed() {
+                    changed = true;
+                }
+                if let Some(r) = out.cursor_range {
+                    let rr = r.as_sorted_char_range();
+                    new_cursor = Some((rr.start.0, rr.end.0));
+                }
+                if let Some(kept) = textedit::keep_selection_on_right_click(&ctx, editor_id, selection_before, &out) {
+                    new_cursor = Some(kept);
+                }
+                textedit::context_menu(&resp, editor_id, !trashed, new_cursor.or(selection_before), &note.text);
 
-                    // Check boxes, quotes, rules and pictures drawn over the text.
-                    let galley = out.galley.clone();
-                    let gpos = out.galley_pos;
-                    let pointer = resp.interact_pointer_pos();
-                    let ov = overlay::paint(ui, &overlay::Input {
+                // Check boxes, quotes, rules and pictures drawn over the text.
+                let galley = out.galley.clone();
+                let gpos = out.galley_pos;
+                let pointer = resp.interact_pointer_pos();
+                let ov = overlay::paint(
+                    ui,
+                    &overlay::Input {
                         text: &note.text,
                         galley: &galley,
                         gpos,
@@ -548,32 +644,36 @@ impl GrassApp {
                         theme: &t,
                         pics: &pics,
                         editable: !trashed,
-                    });
-                    if ov.clicked_box.is_some() {
-                        clicked_box = ov.clicked_box;
+                    },
+                );
+                if ov.clicked_box.is_some() {
+                    clicked_box = ov.clicked_box;
+                }
+                if ov.open_pic.is_some() {
+                    open_pic = ov.open_pic;
+                }
+                // Ctrl+click on links and tags
+                let cmd_down = ui.input(|i| i.modifiers.command);
+                if resp.clicked() && cmd_down {
+                    if let Some(p) = pointer {
+                        let c = galley.cursor_from_pos(p - gpos);
+                        ctrl_click = Some(Self::char_to_byte(&note.text, c.index.0));
                     }
-                    if ov.open_pic.is_some() {
-                        open_pic = ov.open_pic;
-                    }
-                    // Ctrl+click on links and tags
-                    let cmd_down = ui.input(|i| i.modifiers.command);
-                    if resp.clicked() && cmd_down {
-                        if let Some(p) = pointer {
-                            let c = galley.cursor_from_pos(p - gpos);
-                            ctrl_click = Some(Self::char_to_byte(&note.text, c.index.0));
-                        }
-                    }
-                    if resp.hovered() && cmd_down {
-                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                    }
-                    if changed {
-                        note.modified = now();
-                    }
-                });
-                ui.add_space(40.0);
+                }
+                if resp.hovered() && cmd_down {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+                if changed {
+                    note.modified = now();
+                }
             });
+            ui.add_space(40.0);
+        });
         if new_cursor.is_some() {
             self.cursor = new_cursor;
+        }
+        if let Some(image) = pasted_image {
+            self.paste_image(&ctx, id, &image);
         }
         if let Some((name, is_sketch)) = open_pic {
             self.actions.push(if is_sketch { Action::EditSketch(id, name) } else { Action::EditImage(id, name) });
@@ -670,10 +770,7 @@ impl GrassApp {
             let mut st = 0;
             while let Some(p) = line[st..].find(scheme) {
                 let s = st + p;
-                let e = line[s..]
-                    .find(|c: char| c.is_whitespace() || c == ')')
-                    .map(|x| s + x)
-                    .unwrap_or(line.len());
+                let e = line[s..].find(|c: char| c.is_whitespace() || c == ')').map(|x| s + x).unwrap_or(line.len());
                 if off >= s && off <= e {
                     // notes may come from a synced repository: show the address first
                     self.pending_open = Some(OpenRequest::Link(line[s..e].to_string()));

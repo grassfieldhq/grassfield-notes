@@ -86,7 +86,9 @@ fn every_export_format_writes_a_file() {
                 assert!(bytes.len() > 50, "{f:?} too small");
                 match f {
                     crate::export::Format::Pdf => assert!(bytes.starts_with(b"%PDF-")),
-                    crate::export::Format::Docx | crate::export::Format::Epub => assert!(bytes.starts_with(b"PK\x03\x04")),
+                    crate::export::Format::Docx | crate::export::Format::Epub => {
+                        assert!(bytes.starts_with(b"PK\x03\x04"))
+                    }
                     crate::export::Format::Jpg => assert!(bytes.starts_with(&[0xFF, 0xD8])),
                     crate::export::Format::Rtf => assert!(bytes.starts_with(b"{\\rtf1")),
                     _ => {}
@@ -215,8 +217,18 @@ fn sketches_draw_and_reload() {
     let dir = std::env::temp_dir().join(format!("gf-sketch-test-{}", std::process::id()));
     let png = dir.join("croquis.png");
     let mut sk = Sketch::default();
-    sk.strokes.push(Stroke { tool: Tool::Pen, color: [255, 0, 0], width: 10.0, points: vec![[100.0, 100.0], [300.0, 100.0]] });
-    sk.strokes.push(Stroke { tool: Tool::Marker, color: [0, 0, 255], width: 30.0, points: vec![[100.0, 300.0], [300.0, 300.0]] });
+    sk.strokes.push(Stroke {
+        tool: Tool::Pen,
+        color: [255, 0, 0],
+        width: 10.0,
+        points: vec![[100.0, 100.0], [300.0, 100.0]],
+    });
+    sk.strokes.push(Stroke {
+        tool: Tool::Marker,
+        color: [0, 0, 255],
+        width: 30.0,
+        points: vec![[100.0, 300.0], [300.0, 300.0]],
+    });
     sketch::save(&sk, &png).unwrap();
     let img = image::open(&png).unwrap().to_rgba8();
     assert_eq!(img.get_pixel(200, 100).0[..3], [255, 0, 0]); // pen: solid
@@ -233,7 +245,10 @@ fn sketches_draw_and_reload() {
 #[test]
 fn exports_include_pictures() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    std::env::set_var("GRASSFIELD_DATA", std::env::temp_dir().join(format!("gf-pic-export-{}", std::process::id())).join("library.json"));
+    std::env::set_var(
+        "GRASSFIELD_DATA",
+        std::env::temp_dir().join(format!("gf-pic-export-{}", std::process::id())).join("library.json"),
+    );
     let mut lib = Library::sample();
     let id = lib.notes[0].id;
     let dir = Library::attachment_dir(id);
@@ -244,7 +259,8 @@ fn exports_include_pictures() {
     let n = lib.get(id).unwrap();
     let pdf = std::fs::read(crate::export::export_note(n, crate::export::Format::Pdf, &out).unwrap()).unwrap();
     assert!(pdf.windows(10).any(|w| w == b"/DCTDecode"), "picture embedded in PDF");
-    let html = std::fs::read_to_string(crate::export::export_note(n, crate::export::Format::Html, &out).unwrap()).unwrap();
+    let html =
+        std::fs::read_to_string(crate::export::export_note(n, crate::export::Format::Html, &out).unwrap()).unwrap();
     assert!(html.contains("data:image/png;base64,"));
     let epub = std::fs::read(crate::export::export_note(n, crate::export::Format::Epub, &out).unwrap()).unwrap();
     assert!(epub.windows(17).any(|w| w == b"OEBPS/images/img0"));
@@ -256,7 +272,6 @@ fn exports_include_pictures() {
 
 /// Tests that point GRASSFIELD_DATA somewhere take turns.
 pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 
 #[test]
 fn sync_never_trusts_paths_from_the_repository() {
@@ -292,13 +307,23 @@ fn renaming_unicode_tags_never_panics() {
 fn note_ids_never_overflow_or_repeat() {
     let mut lib = Library::default();
     // a synced note can carry the largest id there is
-    lib.notes.push(Note { id: u64::MAX, text: String::new(), created: 0, modified: 0, pinned: false, archived: false, trashed: false, attachments: vec![] });
+    lib.notes.push(Note {
+        id: u64::MAX,
+        text: String::new(),
+        created: 0,
+        modified: 0,
+        pinned: false,
+        archived: false,
+        trashed: false,
+        attachments: vec![],
+    });
     lib.next_id = u64::MAX;
     let a = lib.new_note("a".into());
     let b = lib.new_note("b".into());
     assert!(a != u64::MAX && b != u64::MAX && a != b && a != 0 && b != 0);
 }
 
+#[cfg(unix)]
 fn git_in(dir: &std::path::Path, args: &[&str]) {
     let ok = std::process::Command::new("git")
         .current_dir(dir)
@@ -310,6 +335,7 @@ fn git_in(dir: &std::path::Path, args: &[&str]) {
     assert!(ok, "git {args:?}");
 }
 
+#[cfg(unix)]
 fn note_file(id: u64, attachments: &str, text: &str) -> String {
     format!("---\nid: {id}\ncreated: 1\nmodified: 9999999999\npinned: false\narchived: false\ntrashed: false\nattachments: {attachments}\n---\n{text}")
 }
@@ -384,7 +410,11 @@ fn sync_never_follows_links_from_a_hostile_repository() {
     git_in(&work, &["push", "-q", remote.to_str().unwrap(), "HEAD:refs/heads/main"]);
     let out = crate::sync::run(settings, lib.notes.clone(), lib.synced_ids.clone());
     assert!(out.ok, "{}", out.message);
-    assert_eq!(std::fs::read_to_string(home.join("outside/keep/file")).unwrap(), "keep me", "a linked folder was emptied");
+    assert_eq!(
+        std::fs::read_to_string(home.join("outside/keep/file")).unwrap(),
+        "keep me",
+        "a linked folder was emptied"
+    );
     assert!(!home.join("outside").join(mine.to_string()).exists(), "an attachment was written into a linked folder");
     assert_eq!(std::fs::read_to_string(&bashrc).unwrap(), bashrc_text);
     std::env::remove_var("GRASSFIELD_DATA");
@@ -430,6 +460,7 @@ fn links_already_in_the_local_copy_are_refused() {
     std::env::remove_var("GRASSFIELD_DATA");
 }
 
+#[cfg(unix)]
 fn safefs_is_real_dir(p: &std::path::Path) -> bool {
     std::fs::symlink_metadata(p).map(|m| m.is_dir()).unwrap_or(false)
 }
@@ -505,10 +536,15 @@ fn pictures_never_leave_the_document_folder() {
         assert_eq!(crate::safefs::confine(&doc, bad), None, "{bad}");
     }
     assert!(crate::attach::read_picture(&doc_real.join("fake.png"), crate::safefs::Links::Refuse).is_none());
-    assert!(crate::attach::read_picture(&doc_real.join("pipe.png"), crate::safefs::Links::Refuse).is_none(), "a pipe is never read");
+    assert!(
+        crate::attach::read_picture(&doc_real.join("pipe.png"), crate::safefs::Links::Refuse).is_none(),
+        "a pipe is never read"
+    );
     // exports embed only pictures from the folder, and escape what goes in attributes
     let quoted = "q\" onerror=\"x.png";
-    image::RgbImage::from_pixel(4, 4, image::Rgb([9, 9, 9])).save_with_format(doc.join(quoted), image::ImageFormat::Png).unwrap();
+    image::RgbImage::from_pixel(4, 4, image::Rgb([9, 9, 9]))
+        .save_with_format(doc.join(quoted), image::ImageFormat::Png)
+        .unwrap();
     let text = format!("# T\n![](ok.png)\n![](../secret.png)\n![](pipe.png)\n![]({quoted})\n");
     let html = crate::markdown::to_html("T", &text, Some(&doc));
     assert_eq!(html.matches("data:image/png;base64,").count(), 2);

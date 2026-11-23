@@ -25,7 +25,10 @@ pub(super) struct ImageEditor {
 impl ImageEditor {
     fn refresh_texture(&mut self, ctx: &egui::Context) {
         let preview = image::DynamicImage::ImageRgba8(self.img.clone()).thumbnail(1400, 1400).to_rgba8();
-        let ci = egui::ColorImage::from_rgba_unmultiplied([preview.width() as usize, preview.height() as usize], preview.as_raw());
+        let ci = egui::ColorImage::from_rgba_unmultiplied(
+            [preview.width() as usize, preview.height() as usize],
+            preview.as_raw(),
+        );
         self.tex = Some(ctx.load_texture("image-editor", ci, egui::TextureOptions::LINEAR));
     }
 
@@ -88,14 +91,25 @@ impl GrassApp {
                 ui.set_width(size.x - 28.0);
                 ui.set_height(size.y - 28.0);
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(tr("Recadrer et redimensionner")).font(FontId::new(18.0, FontFamily::Name("bold".into()))).color(t.text));
+                    ui.label(
+                        egui::RichText::new(tr("Recadrer et redimensionner"))
+                            .font(FontId::new(18.0, FontFamily::Name("bold".into())))
+                            .color(t.text),
+                    );
                     ui.add_space(12.0);
                     ui.label(egui::RichText::new(&ed.name).color(t.muted).size(12.5));
                 });
                 ui.add_space(4.0);
                 ui.horizontal_wrapped(|ui| {
                     ui.label(egui::RichText::new(tr("Proportions")).color(t.muted));
-                    for (label, a) in [(tr("Libre"), None), ("1:1", Some(1.0)), ("4:3", Some(4.0 / 3.0)), ("3:2", Some(1.5)), ("16:9", Some(16.0 / 9.0)), ("3:4", Some(0.75))] {
+                    for (label, a) in [
+                        (tr("Libre"), None),
+                        ("1:1", Some(1.0)),
+                        ("4:3", Some(4.0 / 3.0)),
+                        ("3:2", Some(1.5)),
+                        ("16:9", Some(16.0 / 9.0)),
+                        ("3:4", Some(0.75)),
+                    ] {
                         if ui.selectable_label(ed.aspect == a, label).clicked() {
                             ed.aspect = a;
                             if a.is_some() {
@@ -132,13 +146,25 @@ impl GrassApp {
                 let (outer, _) = ui.allocate_exact_size(Vec2::new(avail.x, shown.y.max(40.0)), Sense::hover());
                 let area = Rect::from_center_size(outer.center(), shown);
                 if let Some(tex) = &ed.tex {
-                    ui.painter().image(tex.id(), area, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+                    ui.painter().image(
+                        tex.id(),
+                        area,
+                        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                        Color32::WHITE,
+                    );
                 }
-                let to_screen = |c: [f32; 4]| Rect::from_min_max(
-                    Pos2::new(area.left() + c[0] * area.width(), area.top() + c[1] * area.height()),
-                    Pos2::new(area.left() + c[2] * area.width(), area.top() + c[3] * area.height()),
-                );
-                let to_norm = |p: Pos2| [((p.x - area.left()) / area.width()).clamp(0.0, 1.0), ((p.y - area.top()) / area.height()).clamp(0.0, 1.0)];
+                let to_screen = |c: [f32; 4]| {
+                    Rect::from_min_max(
+                        Pos2::new(area.left() + c[0] * area.width(), area.top() + c[1] * area.height()),
+                        Pos2::new(area.left() + c[2] * area.width(), area.top() + c[3] * area.height()),
+                    )
+                };
+                let to_norm = |p: Pos2| {
+                    [
+                        ((p.x - area.left()) / area.width()).clamp(0.0, 1.0),
+                        ((p.y - area.top()) / area.height()).clamp(0.0, 1.0),
+                    ]
+                };
                 let resp = ui.interact(area.expand(10.0), Id::unique("crop-area"), Sense::drag());
                 if resp.drag_started() {
                     if let Some(pos) = resp.interact_pointer_pos() {
@@ -169,20 +195,41 @@ impl GrassApp {
                         }
                         Drag::Corner(i) => {
                             match i {
-                                0 => { c[0] = q[0].min(c[2] - min); c[1] = q[1].min(c[3] - min); }
-                                1 => { c[2] = q[0].max(c[0] + min); c[1] = q[1].min(c[3] - min); }
-                                2 => { c[2] = q[0].max(c[0] + min); c[3] = q[1].max(c[1] + min); }
-                                _ => { c[0] = q[0].min(c[2] - min); c[3] = q[1].max(c[1] + min); }
+                                0 => {
+                                    c[0] = q[0].min(c[2] - min);
+                                    c[1] = q[1].min(c[3] - min);
+                                }
+                                1 => {
+                                    c[2] = q[0].max(c[0] + min);
+                                    c[1] = q[1].min(c[3] - min);
+                                }
+                                2 => {
+                                    c[2] = q[0].max(c[0] + min);
+                                    c[3] = q[1].max(c[1] + min);
+                                }
+                                _ => {
+                                    c[0] = q[0].min(c[2] - min);
+                                    c[3] = q[1].max(c[1] + min);
+                                }
                             }
                             if let Some(a) = ed.aspect {
                                 // keep proportions: height follows width (in pixels)
                                 let wpx = (c[2] - c[0]) * iw;
                                 let hn = (wpx / a) / ih;
-                                if i <= 1 { c[1] = (c[3] - hn).max(0.0); } else { c[3] = (c[1] + hn).min(1.0); }
+                                if i <= 1 {
+                                    c[1] = (c[3] - hn).max(0.0);
+                                } else {
+                                    c[3] = (c[1] + hn).min(1.0);
+                                }
                             }
                         }
                         Drag::New(s) => {
-                            c = [s[0].min(q[0]), s[1].min(q[1]), s[0].max(q[0]).max(s[0].min(q[0]) + min), s[1].max(q[1]).max(s[1].min(q[1]) + min)];
+                            c = [
+                                s[0].min(q[0]),
+                                s[1].min(q[1]),
+                                s[0].max(q[0]).max(s[0].min(q[0]) + min),
+                                s[1].max(q[1]).max(s[1].min(q[1]) + min),
+                            ];
                             if let Some(a) = ed.aspect {
                                 let hn = ((c[2] - c[0]) * iw / a) / ih;
                                 c[3] = (c[1] + hn).min(1.0);
@@ -200,8 +247,16 @@ impl GrassApp {
                 let p = ui.painter();
                 p.rect_filled(Rect::from_min_max(area.min, Pos2::new(area.right(), r.top())), 0.0, shade);
                 p.rect_filled(Rect::from_min_max(Pos2::new(area.left(), r.bottom()), area.max), 0.0, shade);
-                p.rect_filled(Rect::from_min_max(Pos2::new(area.left(), r.top()), Pos2::new(r.left(), r.bottom())), 0.0, shade);
-                p.rect_filled(Rect::from_min_max(Pos2::new(r.right(), r.top()), Pos2::new(area.right(), r.bottom())), 0.0, shade);
+                p.rect_filled(
+                    Rect::from_min_max(Pos2::new(area.left(), r.top()), Pos2::new(r.left(), r.bottom())),
+                    0.0,
+                    shade,
+                );
+                p.rect_filled(
+                    Rect::from_min_max(Pos2::new(r.right(), r.top()), Pos2::new(area.right(), r.bottom())),
+                    0.0,
+                    shade,
+                );
                 p.rect_stroke(r, 0.0, Stroke::new(3.0, Color32::WHITE), egui::StrokeKind::Outside);
                 p.rect_stroke(r, 0.0, Stroke::new(1.5, t.accent), egui::StrokeKind::Middle);
                 for f in [1.0 / 3.0, 2.0 / 3.0] {
@@ -210,22 +265,46 @@ impl GrassApp {
                 }
                 for c in [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom()] {
                     p.rect_filled(Rect::from_center_size(c, Vec2::splat(12.0)), 2.0, Color32::WHITE);
-                    p.rect_stroke(Rect::from_center_size(c, Vec2::splat(12.0)), 2.0, Stroke::new(1.0, t.accent), egui::StrokeKind::Inside);
+                    p.rect_stroke(
+                        Rect::from_center_size(c, Vec2::splat(12.0)),
+                        2.0,
+                        Stroke::new(1.0, t.accent),
+                        egui::StrokeKind::Inside,
+                    );
                 }
                 ui.add_space(8.0);
                 let (_, _, cw, ch) = ed.crop_px();
-                let (fw, fh) = (((cw as f32) * ed.scale).round().max(1.0) as u32, ((ch as f32) * ed.scale).round().max(1.0) as u32);
+                let (fw, fh) = (
+                    ((cw as f32) * ed.scale).round().max(1.0) as u32,
+                    ((ch as f32) * ed.scale).round().max(1.0) as u32,
+                );
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new(tr("Taille finale")).color(t.muted));
-                    ui.add(egui::Slider::new(&mut ed.scale, 0.1..=1.0).custom_formatter(|v, _| format!("{:.0} %", v * 100.0)));
+                    ui.add(
+                        egui::Slider::new(&mut ed.scale, 0.1..=1.0)
+                            .custom_formatter(|v, _| format!("{:.0} %", v * 100.0)),
+                    );
                     ui.label(egui::RichText::new(format!("{fw} × {fh} px")).color(t.text));
-                    ui.label(egui::RichText::new(trf("(origine : {w} × {h} px)", &[("w", &ed.img.width()), ("h", &ed.img.height())])).color(t.muted).size(12.0));
+                    ui.label(
+                        egui::RichText::new(trf(
+                            "(origine : {w} × {h} px)",
+                            &[("w", &ed.img.width()), ("h", &ed.img.height())],
+                        ))
+                        .color(t.muted)
+                        .size(12.0),
+                    );
                 });
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(tr("Glissez les coins pour recadrer, ou dessinez un nouveau cadre.")).size(12.0).color(t.muted));
+                    ui.label(
+                        egui::RichText::new(tr("Glissez les coins pour recadrer, ou dessinez un nouveau cadre."))
+                            .size(12.0)
+                            .color(t.muted),
+                    );
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let b = egui::Button::new(egui::RichText::new(tr("Enregistrer")).color(Color32::WHITE)).fill(t.accent).stroke(Stroke::NONE);
+                        let b = egui::Button::new(egui::RichText::new(tr("Enregistrer")).color(Color32::WHITE))
+                            .fill(t.accent)
+                            .stroke(Stroke::NONE);
                         if ui.add(b).clicked() {
                             save = true;
                         }
@@ -248,7 +327,8 @@ impl GrassApp {
     fn save_image_edit(&mut self, ctx: &egui::Context, ed: ImageEditor) {
         let (x, y, cw, ch) = ed.crop_px();
         let cropped = image::imageops::crop_imm(&ed.img, x, y, cw, ch).to_image();
-        let (fw, fh) = (((cw as f32) * ed.scale).round().max(1.0) as u32, ((ch as f32) * ed.scale).round().max(1.0) as u32);
+        let (fw, fh) =
+            (((cw as f32) * ed.scale).round().max(1.0) as u32, ((ch as f32) * ed.scale).round().max(1.0) as u32);
         let out = if (fw, fh) != (cw, ch) {
             image::imageops::resize(&cropped, fw, fh, image::imageops::FilterType::Lanczos3)
         } else {

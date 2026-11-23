@@ -22,6 +22,8 @@ pub fn is_attachable(p: &Path) -> bool {
 
 /// Largest picture or document read, attached or embedded in an export.
 pub const MAX_PICTURE_BYTES: u64 = 64 * 1024 * 1024;
+/// Largest width or height of a picture that is decoded or stored.
+pub const MAX_PICTURE_SIDE: u32 = 20_000;
 
 /// What a file really is, from its first bytes (its name may say anything).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -110,7 +112,8 @@ fn executable(_: &Path) -> bool {
 pub fn opens_safely(path: &Path, links: crate::safefs::Links) -> bool {
     let Some(kind) = kind_of(path, links) else { return false };
     let ext = path.extension().and_then(|e| e.to_str()).map(|e| e.to_lowercase()).unwrap_or_default();
-    let named_alike = if kind == Kind::Pdf { DOC_EXT.contains(&ext.as_str()) } else { IMAGE_EXT.contains(&ext.as_str()) };
+    let named_alike =
+        if kind == Kind::Pdf { DOC_EXT.contains(&ext.as_str()) } else { IMAGE_EXT.contains(&ext.as_str()) };
     named_alike && !executable(path)
 }
 
@@ -124,8 +127,8 @@ pub fn read_picture(path: &Path, links: crate::safefs::Links) -> Option<(Vec<u8>
 /// Decode a picture with bounded dimensions and memory (no decompression bombs).
 pub fn decode_picture(bytes: &[u8]) -> Option<image::DynamicImage> {
     let mut limits = image::Limits::default();
-    limits.max_image_width = Some(20_000);
-    limits.max_image_height = Some(20_000);
+    limits.max_image_width = Some(MAX_PICTURE_SIDE);
+    limits.max_image_height = Some(MAX_PICTURE_SIDE);
     limits.max_alloc = Some(512 * 1024 * 1024);
     let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().ok()?;
     reader.limits(limits);
@@ -145,7 +148,10 @@ pub fn path_of(note_id: u64, a: &Attachment) -> PathBuf {
 /// Only regular files of bounded size whose content is a picture or a PDF are accepted.
 pub fn store(note_id: u64, src: &Path) -> std::io::Result<Attachment> {
     if kind_of(src, crate::safefs::Links::Follow).is_none() {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, crate::i18n::tr("ce n'est ni une image ni un PDF")));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            crate::i18n::tr("ce n'est ni une image ni un PDF"),
+        ));
     }
     let dir = Library::attachment_dir(note_id);
     std::fs::create_dir_all(&dir)?;
@@ -165,7 +171,8 @@ pub fn store(note_id: u64, src: &Path) -> std::io::Result<Attachment> {
 }
 
 fn has_tool(name: &str) -> bool {
-    crate::platform::command(name).arg("-v").output().is_ok() || crate::platform::command(name).arg("--version").output().is_ok()
+    crate::platform::command(name).arg("-v").output().is_ok()
+        || crate::platform::command(name).arg("--version").output().is_ok()
 }
 
 /// Which text readers are installed on this computer.
@@ -200,7 +207,8 @@ fn ocr_lang() -> String {
 
 /// Text readers run at most this long per document.
 const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
-/// Memory a text reader may use (address space).
+/// Memory a text reader may use (address space; not on macOS, which has no such limit).
+#[cfg(all(unix, not(target_os = "macos")))]
 const READ_MEMORY: u64 = 1536 * 1024 * 1024;
 /// Most text kept from one document.
 const MAX_TEXT_BYTES: u64 = 4 * 1024 * 1024;
@@ -223,6 +231,9 @@ fn limit_child(cmd: &mut std::process::Command) {
                 }
                 Ok(())
             };
+            // macOS does not support an address-space limit (setrlimit fails), and failing here would stop every
+            // reader from starting: there the CPU, file-size and core limits and the timeout still hold
+            #[cfg(not(target_os = "macos"))]
             set(libc::RLIMIT_AS, READ_MEMORY)?;
             set(libc::RLIMIT_CPU, cpu)?;
             // the readers only write to a pipe: no file of any size
@@ -400,7 +411,18 @@ impl Thumbs {
             let small = img.thumbnail(1000, 1000).to_rgba8();
             let size = [small.width() as usize, small.height() as usize];
             let ci = egui::ColorImage::from_rgba_unmultiplied(size, small.as_raw());
-            ctx.load_texture(format!("thumb-{note_id}-{}-{}", a.name, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)), ci, egui::TextureOptions::LINEAR)
+            ctx.load_texture(
+                format!(
+                    "thumb-{note_id}-{}-{}",
+                    a.name,
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos())
+                        .unwrap_or(0)
+                ),
+                ci,
+                egui::TextureOptions::LINEAR,
+            )
         });
         self.map.insert(key, tex.clone());
         tex
@@ -438,6 +460,7 @@ mod tests {
         let out = run_reader(cmd).unwrap();
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines[0], READ_TIMEOUT.as_secs().to_string(), "CPU limit");
+        #[cfg(not(target_os = "macos"))]
         assert_eq!(lines[1], (READ_MEMORY / 1024).to_string(), "memory limit");
         assert_eq!(lines[2], "0", "no file writes");
     }
@@ -447,7 +470,11 @@ mod tests {
         let mut lib = Library::default();
         let id = lib.new_note("# docs".into());
         for k in 0..5 {
-            lib.get_mut(id).unwrap().attachments.push(Attachment { name: format!("missing-{k}.png"), text: String::new(), read: false });
+            lib.get_mut(id).unwrap().attachments.push(Attachment {
+                name: format!("missing-{k}.png"),
+                text: String::new(),
+                read: false,
+            });
         }
         let ctx = egui::Context::default();
         let mut r = Reader::default();

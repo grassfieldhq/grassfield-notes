@@ -224,7 +224,15 @@ fn textbundle(note: &Note, path: &Path) -> std::io::Result<()> {
     for a in &note.attachments {
         let src = Library::attachment_dir(note.id).join(&a.name);
         let Some(name) = crate::sync::safe_file_name(&a.name) else { continue };
-        if crate::safefs::copy_regular(&src, crate::safefs::Links::Refuse, &path.join("assets").join(&name), crate::attach::MAX_PICTURE_BYTES, 0o644).is_ok() {
+        if crate::safefs::copy_regular(
+            &src,
+            crate::safefs::Links::Refuse,
+            &path.join("assets").join(&name),
+            crate::attach::MAX_PICTURE_BYTES,
+            0o644,
+        )
+        .is_ok()
+        {
             if text.contains(&format!("]({})", a.name)) {
                 text = text.replace(&format!("]({})", a.name), &format!("](assets/{})", a.name));
             } else {
@@ -259,11 +267,18 @@ fn rtf_text(s: &str) -> String {
 }
 
 pub fn rtf(text: &str) -> String {
-    let mut out = String::from("{\\rtf1\\ansi\\ansicpg1252\\deff0{\\fonttbl{\\f0\\fswiss Helvetica;}{\\f1\\fmodern Courier New;}}\n\\fs24\n");
+    let mut out = String::from(
+        "{\\rtf1\\ansi\\ansicpg1252\\deff0{\\fonttbl{\\f0\\fswiss Helvetica;}{\\f1\\fmodern Courier New;}}\n\\fs24\n",
+    );
     for b in blocks(text) {
         let line = match b {
             Block::Heading(l, t) => {
-                let size = match l { 1 => 40, 2 => 32, 3 => 28, _ => 26 };
+                let size = match l {
+                    1 => 40,
+                    2 => 32,
+                    3 => 28,
+                    _ => 26,
+                };
                 format!("{{\\b\\fs{size} {}}}\\par", rtf_text(&t))
             }
             Block::Para(t) => format!("{}\\par", rtf_text(&t)),
@@ -411,13 +426,17 @@ pub fn epub(title: &str, text: &str, id: u64, pics: &Path) -> std::io::Result<Ve
             Block::Image(n) => {
                 // only pictures inside the note's own folder; the stored name and type come
                 // from the picture's content, never from the text
-                let picture = crate::safefs::confine(pics, &n).and_then(|p| crate::attach::read_picture(&p, crate::safefs::Links::Refuse));
+                let picture = crate::safefs::confine(pics, &n)
+                    .and_then(|p| crate::attach::read_picture(&p, crate::safefs::Links::Refuse));
                 match picture {
                     Some((bytes, kind)) => {
                         let k = images.len();
                         let ext = kind.ext();
                         images.push((format!("images/img{k}.{ext}"), bytes, kind.mime()));
-                        format!("<p><img src=\"images/img{k}.{ext}\" alt=\"{}\" style=\"max-width:100%\"/></p>", xml(&n))
+                        format!(
+                            "<p><img src=\"images/img{k}.{ext}\" alt=\"{}\" style=\"max-width:100%\"/></p>",
+                            xml(&n)
+                        )
                     }
                     None => format!("<p><em>{}</em></p>", xml(&image_placeholder(&n))),
                 }
